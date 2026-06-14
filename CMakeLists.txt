@@ -51,13 +51,17 @@ endif()
 if(NOT DEFINED GBJIT_JIT_EVICT)
     set(GBJIT_JIT_EVICT 1)
 endif()
-# PPU render offload to the second core (Core 1). The PPU timing state
-# machine stays synchronous on Core 0 for interrupt parity; only the
-# ~11.5 ms/frame scanline render is handed to Core 1, hidden in Core 0's
-# e-paper VSYNC wait. Falls back to a synchronous render if the render
-# context can't be allocated. Disable with -DGBJIT_PPU_OFFLOAD_THREAD=0.
+# PPU render offload to a second core. DEFAULT OFF on this board: the
+# M5Paper's e-paper panel needs continuous field-sequential driving, so the
+# "msg" task (main/msg/msg.c) runs a never-yielding refresh loop at
+# configMAX_PRIORITIES-1 pinned to Core 1. Core 1 is therefore 100% committed
+# and a render task at any lower priority is starved (the render never
+# completes and the emulation core deadlocks in ppu_offload_render_wait).
+# The offload implementation is host-verified bit-exact and kept gated for a
+# board that DOES have a spare core; enable with -DGBJIT_PPU_OFFLOAD_THREAD=1
+# only on such hardware. See [[paperboy-jit-perf]].
 if(NOT DEFINED GBJIT_PPU_OFFLOAD_THREAD)
-    set(GBJIT_PPU_OFFLOAD_THREAD 1)
+    set(GBJIT_PPU_OFFLOAD_THREAD 0)
 endif()
 
 # Propagate JIT/PPU compile-time toggles project-wide. Flags that
