@@ -24,6 +24,8 @@
 #include "ui.h"
 #include "battery.h"
 #include "profiler.h"
+#include "debug_console.h"
+#include "lockstep_diff.h"
 
 static const char *TAG = "paperboy";
 static sdmmc_card_t *s_sd_card;
@@ -630,6 +632,33 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(200));
     msg_enable_video(true);
 
+#if defined(PAPERBOY_LOCKSTEP_DIFF) && PAPERBOY_LOCKSTEP_DIFF
+    {
+        extern const uint8_t _binary_autoboot_rom_gb_start[] asm("_binary_autoboot_rom_gb_start");
+        extern const uint8_t _binary_autoboot_rom_gb_end[]   asm("_binary_autoboot_rom_gb_end");
+        lockstep_diff_run(_binary_autoboot_rom_gb_start,
+                          (size_t)(_binary_autoboot_rom_gb_end - _binary_autoboot_rom_gb_start));
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+#endif
+
+#if defined(PAPERBOY_AUTOBOOT_EMBEDDED) && PAPERBOY_AUTOBOOT_EMBEDDED
+    /* On-device verification path: boot an embedded ROM directly, bypassing
+     * the SD card and the touch-driven picker. Enabled at configure time via
+     * -DPAPERBOY_AUTOBOOT_ROM=<file> (see main/CMakeLists.txt). */
+    {
+        extern const uint8_t _binary_autoboot_rom_gb_start[] asm("_binary_autoboot_rom_gb_start");
+        extern const uint8_t _binary_autoboot_rom_gb_end[]   asm("_binary_autoboot_rom_gb_end");
+        rom_data = _binary_autoboot_rom_gb_start;
+        rom_size = (size_t)(_binary_autoboot_rom_gb_end - _binary_autoboot_rom_gb_start);
+        strlcpy(s_rom_path, "/embedded/autoboot.gb", sizeof(s_rom_path));
+        ESP_LOGW(TAG, "AUTOBOOT: embedded ROM (%u bytes), bypassing SD picker", (unsigned)rom_size);
+        gb_ok = paperboy_gb_init(rom_data, rom_size);
+        if (gb_ok) paperboy_gb_set_buttons(0);
+        else ESP_LOGE(TAG, "AUTOBOOT: gb init failed: %s", paperboy_gb_last_error());
+    }
+    (void)sd_err;
+#else
     sd_err = sdcard_mount();
     if (sd_err == ESP_OK) {
         char rom_path[256] = {0};
@@ -698,6 +727,7 @@ void app_main(void)
     } else {
         ESP_LOGW(TAG, "SD init skipped, falling back to built-in stub ROM");
     }
+#endif /* PAPERBOY_AUTOBOOT_EMBEDDED */
 
     if (rom_data == NULL) {
         gb_ok = paperboy_gb_init(rom_data, rom_size);
@@ -710,6 +740,8 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Entering GB render loop");
     ESP_LOGI(TAG, "GB backend: %s", paperboy_gb_backend_name());
+
+    dbg_console_init();
 
     /* Maximum number of consecutive rendered frames that may be skipped
      * (video output suppressed) when the emulator falls behind VSYNC. */
@@ -738,7 +770,7 @@ void app_main(void)
         /* Poll touchscreen and update GB button state every emulated frame. */
         PROF_BEGIN(PROF_TOUCH);
         touch_state = tp_read_state();
-        paperboy_gb_set_buttons(touch_state.gb_buttons);
+        paperboy_gb_set_buttons(touch_state.gb_buttons | dbg_console_button_mask());
         PROF_END(PROF_TOUCH);
 
         action_edges = touch_state.actions & (uint8_t)~prev_actions;
@@ -784,6 +816,8 @@ void app_main(void)
             continue;
         }
         PROF_END(PROF_FRAME);
+
+        dbg_console_after_frame(paperboy_gb_debug_lcd());
 
         /* Battery-low overlay: overwrite the top row of the game frame. */
         if (!skip_render && battery_is_low()) {

@@ -1,0 +1,40 @@
+# Paperboy (ESP32-S3) board defaults.
+# Derived from the connected board: ESP32-S3, 8 MB embedded octal PSRAM
+# (AP_3v3), 16 MB flash. The submodule board defaults target other boards
+# (Heltec OLED / qemu) and do NOT enable PSRAM, so they are not used here.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# Flash: 16 MB detected.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# PSRAM: 8 MB embedded octal. main.c allocates cart ROM / saves / state
+# buffers with MALLOC_CAP_SPIRAM, so this must be on.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Run the dual Xtensa LX7 at the datasheet max.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Console on the native USB (USB-Serial-JTAG). This board exposes only the
+# ESP32-S3 native USB (/dev/ttyACM0, VID:PID 303a:1001) with no separate
+# UART bridge, so logs must go here to be visible over the same cable used
+# for flashing.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# JIT requirements (mirrors the submodule's known-good target settings):
+#  - memprot off: the JIT code cache lives in IRAM, is written via the data
+#    path, and is then executed — memprot would fault that.
+#  - both watchdogs off: the dispatcher busy-loops with no yield points.
+CONFIG_ESP_SYSTEM_MEMPROT_FEATURE=n
+CONFIG_ESP_INT_WDT=n
+CONFIG_ESP_TASK_WDT_EN=n
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Release build.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Large single-app partition (no OTA); the firmware embeds image assets and
+# both emulator cores, so the default ~1 MB app partition is too small.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

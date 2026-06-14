@@ -53,4 +53,8 @@ const char *paperboy_gb_last_error(void);
 const char *paperboy_gb_backend_name(void);
 bool paperboy_gb_get_stats(paperboy_gb_stats_t *stats);
 
+/* Debug: pointer to the live 160x144 GB framebuffer (shade 0..3), or NULL if
+ * the gbjit backend isn't running. Used by the on-device debug console. */
+const uint8_t *paperboy_gb_debug_lcd(void);
+
 #endif

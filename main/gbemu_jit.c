@@ -115,6 +115,28 @@ static bool gbjit_init_backend(const uint8_t *rom, size_t rom_size)
     }
     s_dispatcher_ready = true;
 
+    /* Match the known-good HTIT-WB32LAF_V3.2 board build: disable the
+     * static-successor prefetcher. gbjit_dispatcher_init() defaults it ON,
+     * but the HTIT app (boards/.../main/app_main.c) explicitly turns it OFF.
+     * With it on, the dispatcher eagerly compiles fall-through successor
+     * blocks; on the SML title->level transition that's a burst of
+     * compiles that (a) spikes one frame to ~190 ms (visible freeze) and
+     * (b) churns the code cache enough that native execution mis-branches
+     * (jumps into the bonus-game handler / locks up). The lazy chain-miss
+     * path still compiles blocks on demand. The host Xtensa simulator
+     * tolerates the prefetch path, so this only shows on real hardware. */
+    s_dispatcher.prefetch_enabled = false;
+
+#if defined(PAPERBOY_GB_FORCE_INTERP) && PAPERBOY_GB_FORCE_INTERP
+    /* Debug toggle: run every step through the reference interpreter
+     * (sm83_step) instead of compiling/executing native JIT blocks. Same
+     * dispatcher loop, same PPU/timer ticking — isolates JIT-codegen /
+     * native-execution bugs (e.g. instruction-cache staleness) from the
+     * shared core. Enabled via -DPAPERBOY_GB_FORCE_INTERP=1. */
+    s_dispatcher.interp_fallback = true;
+    ESP_LOGW(TAG, "gbjit: FORCE_INTERP enabled (no native JIT)");
+#endif
+
     ppu_thread_start(&s_cpu);
 
     s_ready = true;
@@ -130,6 +152,11 @@ static void gbjit_set_buttons(uint8_t pressed_mask)
     }
 
     mmu_set_joypad_state(&s_mmu, pressed_mask);
+}
+
+const uint8_t *paperboy_gb_debug_lcd(void)
+{
+    return (s_ready && s_dispatcher_ready) ? s_mmu.framebuffer : NULL;
 }
 
 static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
