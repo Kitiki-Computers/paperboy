@@ -28,6 +28,15 @@
 #include "lockstep_diff.h"
 
 static const char *TAG = "paperboy";
+
+#ifndef PAPERBOY_PERF_HUD
+#define PAPERBOY_PERF_HUD 1
+#endif
+#if PAPERBOY_PERF_HUD
+/* Perf HUD on/off at runtime (toggle with the 'h' debug-console command).
+ * Non-static so debug_console.c can flip it. */
+bool g_perf_hud = true;
+#endif
 static sdmmc_card_t *s_sd_card;
 static uint8_t *s_rom_data;
 static size_t s_rom_size;
@@ -823,6 +832,36 @@ void app_main(void)
         if (!skip_render && battery_is_low()) {
             ui_draw_bat_low_overlay(video_fb);
         }
+
+#if PAPERBOY_PERF_HUD
+        /* Perf HUD: worst-case timing overlaid on the top-left of the frame,
+         * refreshed ~1 Hz (the profiler interval). All times are the WORST
+         * single frame in the last second; FPS is current/min. Drawn into the
+         * live video_fb each rendered frame (the buffer is redrawn anyway).
+         * Toggle at runtime with the debug console 'h' command. */
+        if (!skip_render && g_perf_hud) {
+            profiler_hud_t h;
+            profiler_get_hud(&h);
+            if (h.valid) {
+                /* Re-render the HUD text only when the profiler publishes new
+                 * values (~1 Hz); blit the cached strip every frame. */
+                static uint32_t last_gen = 0xFFFFFFFFu;
+                if (h.gen != last_gen) {
+                    last_gen = h.gen;
+                    char b[28];
+                    snprintf(b, sizeof b, "FPS %2.0f/%2.0f", h.fps_cur, h.fps_min);
+                    ui_hud_set_line(0, b);
+                    snprintf(b, sizeof b, "CPU%5.1f PPU%5.1f", h.cpu_ms, h.ppu_ms);
+                    ui_hud_set_line(1, b);
+                    snprintf(b, sizeof b, "LCD%5.1f FLP%5.1f", h.lcd_ms, h.flip_ms);
+                    ui_hud_set_line(2, b);
+                    snprintf(b, sizeof b, "SND%5.1f TCH%5.1f", h.audio_ms, h.touch_ms);
+                    ui_hud_set_line(3, b);
+                }
+                ui_hud_blit(video_fb);
+            }
+        }
+#endif
 
         /* Check whether at least one VSYNC fired while we were rendering. */
         bool missed = (msg_get_vsync_count() != vsync_ref);

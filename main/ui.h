@@ -51,3 +51,15 @@ void ui_clear_ghosting(void);
  * video framebuffer.  Call after paperboy_gb_run_frame() on rendered frames
  * when battery_is_low() returns true. */
 void ui_draw_bat_low_overlay(uint8_t *fb);
+
+/* Draw a NUL-terminated string into the video framebuffer at logical pixel
+ * (x,y), colour fg on background bg (0=black .. 3=white). Each glyph cell is
+ * 6x8 logical px; clips at the right edge (x+6 > 160). */
+void ui_draw_text(uint8_t *fb, int x, int y, const char *s, int fg, int bg);
+
+/* Cached perf-HUD overlay (top-left box). ui_hud_set_line re-renders one HUD
+ * text line into an internal cache (call only when the text changes, ~1 Hz);
+ * ui_hud_blit copies the cached HUD region into the live framebuffer (call
+ * every rendered frame — cheap memcpy, the game blit overwrites it otherwise). */
+void ui_hud_set_line(int row, const char *text);
+void ui_hud_blit(uint8_t *fb);

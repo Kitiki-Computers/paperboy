@@ -30,9 +30,25 @@ static int64_t  s_sec_start_us; /* esp_timer_get_time() at start of interval */
  */
 static _Atomic uint32_t s_audio_sec_us = 0;
 
+/* Worst-case (max) per-frame µs over the current interval, for the on-screen
+ * HUD. Reset every interval alongside s_sec_us. */
+static int64_t s_max_us[PROF_PHASES];
+static int64_t s_max_cpu_us;
+static int64_t s_max_dt_us;       /* longest full main-loop frame (→ min fps) */
+static int64_t s_prev_end_us;     /* timestamp of the previous frame_end */
+
+/* Latest published HUD snapshot (computed once per interval, read every frame
+ * from the same task, so no locking needed). */
+static profiler_hud_t s_hud;
+
 /* -------------------------------------------------------------------------
  * Public API
  * ---------------------------------------------------------------------- */
+
+void profiler_get_hud(profiler_hud_t *out)
+{
+    if (out) *out = s_hud;
+}
 
 void profiler_begin(int phase)
 {
@@ -54,6 +70,23 @@ void profiler_audio_add(int64_t elapsed_us)
 
 void profiler_frame_end(bool skipped)
 {
+    int64_t now_us = esp_timer_get_time();
+
+    /* Worst-case tracking for the HUD — must read s_frame_us BEFORE it is
+     * zeroed below. cpu is derived (frame - lcd - ppu); track its per-frame
+     * max directly (max of the difference, not difference of the maxima). */
+    int64_t cpu_us = s_frame_us[PROF_FRAME] - s_frame_us[PROF_LCD] - s_frame_us[PROF_PPU];
+    if (cpu_us < 0) cpu_us = 0;
+    for (int i = 0; i < PROF_PHASES; i++) {
+        if (s_frame_us[i] > s_max_us[i]) s_max_us[i] = s_frame_us[i];
+    }
+    if (cpu_us > s_max_cpu_us) s_max_cpu_us = cpu_us;
+    if (s_prev_end_us != 0) {
+        int64_t dt = now_us - s_prev_end_us;   /* full main-loop frame time */
+        if (dt > s_max_dt_us) s_max_dt_us = dt;
+    }
+    s_prev_end_us = now_us;
+
     /* Accumulate this frame's data into per-second buckets. */
     for (int i = 0; i < PROF_PHASES; i++) {
         s_sec_us[i] += s_frame_us[i];
@@ -65,7 +98,6 @@ void profiler_frame_end(bool skipped)
     }
 
     /* Initialise the timer on the first call. */
-    int64_t now_us = esp_timer_get_time();
     if (s_sec_start_us == 0) {
         s_sec_start_us = now_us;
         return;
@@ -96,6 +128,22 @@ void profiler_frame_end(bool skipped)
     const float budget_ms = 17.7f;
     float budget_pct = 100.0f * ms_total / budget_ms;
 
+    /* Publish the worst-case HUD snapshot for this interval. */
+    float interval_us = (float)(now_us - s_sec_start_us);
+    s_hud.valid    = true;
+    s_hud.gen++;
+    s_hud.fps_cur  = (interval_us > 0.0f) ? ((float)s_sec_frames * 1.0e6f / interval_us) : 0.0f;
+    s_hud.fps_min  = (s_max_dt_us > 0)    ? (1.0e6f / (float)s_max_dt_us) : 0.0f;
+    s_hud.frame_ms = (float)s_max_us[PROF_FRAME] * 0.001f;
+    s_hud.cpu_ms   = (float)s_max_cpu_us         * 0.001f;
+    s_hud.ppu_ms   = (float)s_max_us[PROF_PPU]   * 0.001f;
+    s_hud.lcd_ms   = (float)s_max_us[PROF_LCD]   * 0.001f;
+    s_hud.flip_ms  = (float)s_max_us[PROF_FLIP]  * 0.001f;
+    s_hud.touch_ms = (float)s_max_us[PROF_TOUCH] * 0.001f;
+    s_hud.audio_ms = ms_audio;       /* average over the interval */
+    s_hud.frames   = s_sec_frames;
+    s_hud.skipped  = s_sec_skipped;
+
     ESP_LOGI(TAG, "%" PRIu32 " fr (%" PRIu32 " skip) "
              "| cpu %4.1fms  ppu %4.1fms  lcd %4.1fms  flip %4.1fms  touch %4.1fms  audio %4.1fms "
              "| total %4.1fms / %.1fms budget (%4.1f%%)",
@@ -105,6 +153,9 @@ void profiler_frame_end(bool skipped)
 
     /* Reset for next interval. */
     memset(s_sec_us, 0, sizeof(s_sec_us));
+    memset(s_max_us, 0, sizeof(s_max_us));
+    s_max_cpu_us  = 0;
+    s_max_dt_us   = 0;
     s_sec_frames  = 0;
     s_sec_skipped = 0;
     s_sec_start_us = now_us;

@@ -107,6 +107,14 @@ static void parse_line(char *line) {
                    (long long)esp_timer_get_time());
             fflush(stdout);
         }
+    } else if (cmd == 'h') {
+        /* Toggle the on-screen perf HUD. */
+#if PAPERBOY_PERF_HUD
+        extern bool g_perf_hud;
+        g_perf_hud = !g_perf_hud;
+        printf("[hud] %s\n", g_perf_hud ? "on" : "off");
+        fflush(stdout);
+#endif
     }
 }
 
@@ -138,7 +146,7 @@ void dbg_console_init(void) {
     s_window_start_us = s_last_us;
     xTaskCreatePinnedToCore(rx_task, "dbg_rx", 3072, NULL,
                             tskIDLE_PRIORITY + 1, NULL, 0 /* Core 0 */);
-    printf("\n[dbg] console ready: b/t/f/s/z\n");
+    printf("\n[dbg] console ready: b/t/f/s/z/v/j/h\n");
 }
 
 uint8_t dbg_console_button_mask(void) { return s_btn; }

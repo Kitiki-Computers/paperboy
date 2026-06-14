@@ -35,6 +35,14 @@ idf_component_register(
 # Audio APU format: 16-bit signed integer
 target_compile_definitions(${COMPONENT_LIB} PRIVATE MINIGB_APU_AUDIO_FORMAT_S16SYS)
 
+# On-screen perf HUD (worst-case FPS/CPU/PPU/LCD/FLIP/sound timing overlaid on
+# the top-left of the frame). Default ON; disable with -DPAPERBOY_PERF_HUD=0.
+# Runtime toggle: the 'h' debug-console command.
+if(NOT DEFINED PAPERBOY_PERF_HUD)
+    set(PAPERBOY_PERF_HUD 1)
+endif()
+target_compile_definitions(${COMPONENT_LIB} PRIVATE PAPERBOY_PERF_HUD=${PAPERBOY_PERF_HUD})
+
 # The newer xtensa-esp-elf gcc 15 toolchain promotes several benign warnings
 # (e.g. -Wtype-limits on config-gated `unsigned >= 0` comparisons) that ESP-IDF
 # turns into errors via -Werror. This predates the toolchain bump; keep these as
