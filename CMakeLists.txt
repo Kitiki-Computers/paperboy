@@ -51,6 +51,14 @@ endif()
 if(NOT DEFINED GBJIT_JIT_EVICT)
     set(GBJIT_JIT_EVICT 1)
 endif()
+# PPU render offload to the second core (Core 1). The PPU timing state
+# machine stays synchronous on Core 0 for interrupt parity; only the
+# ~11.5 ms/frame scanline render is handed to Core 1, hidden in Core 0's
+# e-paper VSYNC wait. Falls back to a synchronous render if the render
+# context can't be allocated. Disable with -DGBJIT_PPU_OFFLOAD_THREAD=0.
+if(NOT DEFINED GBJIT_PPU_OFFLOAD_THREAD)
+    set(GBJIT_PPU_OFFLOAD_THREAD 1)
+endif()
 
 # Propagate JIT/PPU compile-time toggles project-wide. Flags that
 # affect the mmu struct layout (e.g. GBJIT_FRAMEBUFFER_DOUBLE_BUFFER)
@@ -74,6 +82,8 @@ foreach(_opt
         GBJIT_PPU_DRAW_MAX_X
         GBJIT_ARENA_KB
         GBJIT_JIT_EVICT
+        GBJIT_PPU_OFFLOAD
+        GBJIT_PPU_OFFLOAD_THREAD
         GBJIT_HTIT_OLED_ENABLE
         GBJIT_HTIT_OLED_MIN_INTERVAL_MS
         GBJIT_DISPATCHER_SERVICE_SHORTCUT

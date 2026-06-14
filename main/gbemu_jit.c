@@ -11,6 +11,7 @@
 #include "cpu_state.h"
 #include "dispatcher.h"
 #include "memory.h"
+#include "ppu.h"
 #include "ppu_thread.h"
 
 static const char *TAG = "gbjit_pb";
@@ -83,6 +84,7 @@ static bool gbjit_init_backend(const uint8_t *rom, size_t rom_size)
         return false;
     }
 
+    ppu_offload_thread_stop();
     ppu_thread_stop();
     if (s_dispatcher_ready) {
         gbjit_dispatcher_shutdown(&s_dispatcher);
@@ -138,6 +140,7 @@ static bool gbjit_init_backend(const uint8_t *rom, size_t rom_size)
 #endif
 
     ppu_thread_start(&s_cpu);
+    ppu_offload_thread_start();   /* no-op unless GBJIT_PPU_OFFLOAD_THREAD */
 
     s_ready = true;
     set_last_error("ok");
@@ -168,6 +171,23 @@ static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
         return false;
     }
 
+#if GBJIT_PPU_OFFLOAD_THREAD
+    /* Pipelined: the render of the *previous* frame was dispatched to the
+     * second core at its VBlank and ran concurrently with this thread's
+     * idle time (the e-paper VSYNC wait). Block until it's complete, then
+     * blit it. This surfaces frames with one frame of latency, but keeps
+     * the ~11.5 ms scanline render off this core's critical path. */
+    ppu_offload_render_wait();
+    if (!skip_render && fb != NULL) {
+        PROF_BEGIN(PROF_LCD);
+        for (uint_fast8_t line = 0; line < GB_LCD_HEIGHT; line++) {
+            const uint8_t *src = &s_mmu.framebuffer[(size_t)line * GB_LCD_WIDTH];
+            paperboy_gb_blit_line(fb, src, line);
+        }
+        PROF_END(PROF_LCD);
+    }
+#endif
+
     start_frame = s_mmu.frame_seq;
     do {
         gbjit_dispatcher_run_until(&s_dispatcher, s_cpu.cycles + GB_FRAME_CYCLES);
@@ -177,6 +197,10 @@ static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
         }
     } while (s_ready && s_mmu.frame_seq == start_frame);
 
+#if !GBJIT_PPU_OFFLOAD_THREAD
+    /* Synchronous render: the scanlines were drawn during emulation (at each
+     * mode3->0, or batched at VBlank under GBJIT_PPU_OFFLOAD), so the GB
+     * framebuffer holds this frame now. */
     if (!skip_render && fb != NULL) {
         PROF_BEGIN(PROF_LCD);
         for (uint_fast8_t line = 0; line < GB_LCD_HEIGHT; line++) {
@@ -185,6 +209,7 @@ static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
         }
         PROF_END(PROF_LCD);
     }
+#endif
 
     return true;
 }
