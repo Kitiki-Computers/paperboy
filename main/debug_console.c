@@ -77,6 +77,36 @@ static void parse_line(char *line) {
         s_stats_req = true;
     } else if (cmd == 'z') {
         s_reset_req = true;
+    } else if (cmd == 'v') {
+        /* Report the panel field (VSYNC) counter + wall clock so the host can
+         * compute the e-paper refresh/field rate independent of emulation fps. */
+        extern uint32_t msg_get_vsync_count(void);
+        printf("[vsync] count=%lu us=%lld\n",
+               (unsigned long)msg_get_vsync_count(),
+               (long long)esp_timer_get_time());
+        fflush(stdout);
+    } else if (cmd == 'j') {
+        /* Report JIT counters (need DEBUG=1 build) + cycles, to compute
+         * blocks-compiled/sec etc. and detect recompilation thrashing. */
+        paperboy_gb_stats_t st;
+        if (paperboy_gb_get_stats(&st)) {
+            printf("[jit] cyc=%llu blkcomp=%llu bbchit=%llu bbcmiss=%llu blkexec=%llu chmiss=%llu smcinv=%llu arst=%llu bankflip=%llu smcflush=%llu interp=%llu arena=%lu/%lu us=%lld\n",
+                   (unsigned long long)st.emulated_cycles,
+                   (unsigned long long)st.blocks_compiled,
+                   (unsigned long long)st.bbc_hits,
+                   (unsigned long long)st.bbc_misses,
+                   (unsigned long long)st.blocks_executed,
+                   (unsigned long long)st.chain_misses,
+                   (unsigned long long)st.smc_invalidations,
+                   (unsigned long long)st.arena_resets,
+                   (unsigned long long)st.bank_flips,
+                   (unsigned long long)st.smc_flushes,
+                   (unsigned long long)st.interp_steps,
+                   (unsigned long)st.arena_used,
+                   (unsigned long)st.arena_bytes,
+                   (long long)esp_timer_get_time());
+            fflush(stdout);
+        }
     }
 }
 

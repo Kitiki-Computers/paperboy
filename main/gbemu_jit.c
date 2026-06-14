@@ -272,6 +272,15 @@ static bool gbjit_get_stats(paperboy_gb_stats_t *stats)
     stats->blocks_executed = s_dispatcher.blocks_executed;
     stats->chain_hits = s_dispatcher.chain_hits;
     stats->chain_misses = s_dispatcher.chain_misses;
+    stats->smc_invalidations = s_dispatcher.smc_invalidations;
+    stats->arena_resets = s_dispatcher.arena_resets;
+    stats->bank_flips = s_dispatcher.bank_flips;
+    stats->smc_flushes = s_dispatcher.smc_flushes;
+    stats->bbc_hits = s_dispatcher.bbc_hits;
+    stats->bbc_misses = s_dispatcher.bbc_misses;
+    stats->interp_steps = s_dispatcher.interp_steps;
+    stats->arena_used = s_dispatcher.cc.used;
+    stats->arena_bytes = s_dispatcher.cc.cap;
     return true;
 }
 

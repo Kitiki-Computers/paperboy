@@ -32,6 +32,15 @@ typedef struct {
     uint64_t blocks_executed;
     uint64_t chain_hits;
     uint64_t chain_misses;
+    uint64_t smc_invalidations;
+    uint64_t arena_resets;
+    uint64_t bank_flips;
+    uint64_t smc_flushes;
+    uint64_t interp_steps;
+    uint32_t arena_used;
+    uint32_t arena_bytes;
+    uint64_t bbc_hits;
+    uint64_t bbc_misses;
 } paperboy_gb_stats_t;
 
 bool paperboy_gb_init(const uint8_t *rom, size_t rom_size);

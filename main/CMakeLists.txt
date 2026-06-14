@@ -75,6 +75,11 @@ endif()
 if(DEFINED PAPERBOY_SELFLOOP)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE GBJIT_DISPATCHER_SELFLOOP=${PAPERBOY_SELFLOOP})
 endif()
+# Enable the gbjit DEBUG counters (blocks_compiled/chain_misses/...) so the
+# debug console 'j' command can measure JIT recompilation rate.
+if(PAPERBOY_JIT_STATS)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEBUG=1)
+endif()
 
 # Match the known-good HTIT-WB32LAF_V3.2 board build: compile the gbjit-xtensa
 # core + JIT at -O3 (the dispatcher busy-loop and codegen are the hot path;
