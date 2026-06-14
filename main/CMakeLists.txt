@@ -67,6 +67,14 @@ endif()
 if(PAPERBOY_AUTOTEST)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE PAPERBOY_AUTOTEST=1)
 endif()
+# Diagnostic toggles for the device-only JIT dispatcher fast paths (root-causing
+# the SML chain-batch interrupt-deferral bug).
+if(DEFINED PAPERBOY_CHAIN_BATCH)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE GBJIT_DISPATCHER_CHAIN_BATCH=${PAPERBOY_CHAIN_BATCH})
+endif()
+if(DEFINED PAPERBOY_SELFLOOP)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE GBJIT_DISPATCHER_SELFLOOP=${PAPERBOY_SELFLOOP})
+endif()
 
 # Match the known-good HTIT-WB32LAF_V3.2 board build: compile the gbjit-xtensa
 # core + JIT at -O3 (the dispatcher busy-loop and codegen are the hot path;
