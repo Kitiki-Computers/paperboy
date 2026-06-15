@@ -19,6 +19,12 @@ static const char *TAG = "gbjit_pb";
 static cpu_state s_cpu;
 static mmu s_mmu;
 static gbjit_dispatcher s_dispatcher;
+
+/* Max GB-frames of cycles emulated per paperboy_gb_run_frame() call. Bounds the
+ * per-wall-frame work while a game holds the LCD off (no VBlank to end the
+ * loop) — e.g. a level load — so off-screen init spreads across wall frames
+ * instead of one ~100ms spike. Runtime-tunable via the 'm' debug command. */
+static int s_max_subframes = 2;
 static bool s_dispatcher_ready;
 static bool s_ready;
 static char s_last_error[128];
@@ -195,6 +201,16 @@ static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
      * next displayed frame redraws all 144 lines fresh. */
     gbjit_ppu_skip_pixels = skip_render ? 1 : 0;
 
+    /* Bound the work per wall-clock frame. Normally one VBlank fires per
+     * GB_FRAME_CYCLES and the loop runs once. But while a game holds the LCD
+     * OFF (SML does this during a level load), frame_seq never advances, so the
+     * loop would otherwise grind through the *entire* off-screen init in a
+     * single wall frame — hundreds of fresh-block compiles back to back, the
+     * ~135 ms "1% low" spike. Cap the sub-frames per call: when the LCD is off
+     * we return after MAX_SUBFRAMES GB-frames of cycles, spreading the init
+     * across several wall frames (nothing is displayed during LCD-off anyway,
+     * and cpu->cycles is continuous so timing/IRQ state is unaffected). */
+    int subframes = 0;
     start_frame = s_mmu.frame_seq;
     do {
         gbjit_dispatcher_run_until(&s_dispatcher, s_cpu.cycles + GB_FRAME_CYCLES);
@@ -203,7 +219,8 @@ static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
             gbjit_ppu_skip_pixels = 0;
             return false;
         }
-    } while (s_ready && s_mmu.frame_seq == start_frame);
+    } while (s_ready && s_mmu.frame_seq == start_frame
+             && ++subframes < s_max_subframes);
 
     gbjit_ppu_skip_pixels = 0;
 
@@ -321,6 +338,17 @@ void paperboy_jit_set_prefetch_depth(uint32_t depth)
 uint32_t paperboy_jit_get_prefetch_depth(void)
 {
     return s_dispatcher.prefetch_enabled ? s_dispatcher.prefetch_depth : 0;
+}
+
+/* Runtime tuning for the LCD-off sub-frame cap (debug console 'm <n>'). */
+void paperboy_jit_set_max_subframes(uint32_t n)
+{
+    s_max_subframes = (n < 1) ? 1 : (int)n;
+}
+
+uint32_t paperboy_jit_get_max_subframes(void)
+{
+    return (uint32_t)s_max_subframes;
 }
 
 static bool gbjit_get_stats(paperboy_gb_stats_t *stats)

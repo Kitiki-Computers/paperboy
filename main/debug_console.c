@@ -137,6 +137,16 @@ static void parse_line(char *line) {
         printf("[prefetch] depth=%lu\n",
                (unsigned long)paperboy_jit_get_prefetch_depth());
         fflush(stdout);
+    } else if (cmd == 'm') {
+        /* Set the LCD-off sub-frame cap (>=1). Bounds per-wall-frame work
+         * during level loads. */
+        extern void paperboy_jit_set_max_subframes(uint32_t);
+        extern uint32_t paperboy_jit_get_max_subframes(void);
+        uint32_t n = (uint32_t)strtoul(arg, NULL, 10);
+        paperboy_jit_set_max_subframes(n);
+        printf("[subframes] max=%lu\n",
+               (unsigned long)paperboy_jit_get_max_subframes());
+        fflush(stdout);
     } else if (cmd == 'h') {
         /* Toggle the on-screen perf HUD. */
 #if PAPERBOY_PERF_HUD
@@ -176,7 +186,7 @@ void dbg_console_init(void) {
     s_window_start_us = s_last_us;
     xTaskCreatePinnedToCore(rx_task, "dbg_rx", 3072, NULL,
                             tskIDLE_PRIORITY + 1, NULL, 0 /* Core 0 */);
-    printf("\n[dbg] console ready: b/t/f/s/z/v/j/h/c\n");
+    printf("\n[dbg] console ready: b/t/f/s/z/v/j/h/c/p/m\n");
 }
 
 uint8_t dbg_console_button_mask(void) { return s_btn; }

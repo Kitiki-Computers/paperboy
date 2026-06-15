@@ -57,6 +57,15 @@ endif()
 if(NOT DEFINED GBJIT_JIT_EVICT)
     set(GBJIT_JIT_EVICT 1)
 endif()
+# Per-frame JIT compile budget. Caps gbjit_compile_block calls per dispatcher
+# run (~one GB frame) so a compile burst (a level load compiling hundreds of
+# fresh blocks) spreads across frames instead of stalling one for ~250ms — the
+# dominant "1% low" frame-time spike. 8 is the SML attract-demo knee: worst
+# frame 257ms->~70ms, 1%-low 6.8->17.6 fps, with negligible steady-state cost
+# (steady play rarely compiles >8 blocks/frame). 0 = unlimited. See dispatcher.h.
+if(NOT DEFINED GBJIT_COMPILE_BUDGET)
+    set(GBJIT_COMPILE_BUDGET 8)
+endif()
 # Skip the per-block sm83_service_interrupts/ppu_tick call when nothing is due
 # (inlined early-return predicate). Behavior-preserving; parity-verified.
 if(NOT DEFINED GBJIT_DISPATCHER_SERVICE_SHORTCUT)
@@ -97,6 +106,7 @@ foreach(_opt
         GBJIT_PPU_DRAW_MAX_X
         GBJIT_ARENA_KB
         GBJIT_JIT_EVICT
+        GBJIT_COMPILE_BUDGET
         GBJIT_PPU_OFFLOAD
         GBJIT_PPU_OFFLOAD_THREAD
         GBJIT_HTIT_OLED_ENABLE
