@@ -53,10 +53,10 @@ static bool gbjit_is_rom_supported(const uint8_t *rom, size_t rom_size)
     }
 
     switch (cart_type) {
-    case 0x00:
-    case 0x01:
-    case 0x02:
-    case 0x03:
+    case 0x00:                          /* ROM only            */
+    case 0x01: case 0x02: case 0x03:    /* MBC1 (+RAM/+battery) */
+    case 0x0F: case 0x10: case 0x11:    /* MBC3 (+timer)        */
+    case 0x12: case 0x13:               /* MBC3 (+RAM/+battery) */
         return true;
     default:
         return false;
@@ -86,7 +86,7 @@ static void io_write_cb(void *ctx, uint16_t addr, uint8_t value)
 static bool gbjit_init_backend(const uint8_t *rom, size_t rom_size)
 {
     if (!gbjit_is_rom_supported(rom, rom_size)) {
-        set_last_error("gbjit only supports DMG ROM/MBC1 carts up to 256KB");
+        set_last_error("gbjit supports DMG ROM-only / MBC1 / MBC3 carts up to 2MB");
         return false;
     }
 
