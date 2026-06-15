@@ -188,14 +188,24 @@ static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
     }
 #endif
 
+    /* Skipped frames won't be displayed (the main loop fell behind VSYNC and is
+     * catching up). Tell the PPU to run timing-only: it advances LY/STAT/mode/
+     * IRQ and window_line exactly as a drawn frame but skips the ~11 ms per-pixel
+     * scanline render. The framebuffer is never read for a skipped frame; the
+     * next displayed frame redraws all 144 lines fresh. */
+    gbjit_ppu_skip_pixels = skip_render ? 1 : 0;
+
     start_frame = s_mmu.frame_seq;
     do {
         gbjit_dispatcher_run_until(&s_dispatcher, s_cpu.cycles + GB_FRAME_CYCLES);
         if (s_cpu.stopped) {
             set_last_error("cpu stopped");
+            gbjit_ppu_skip_pixels = 0;
             return false;
         }
     } while (s_ready && s_mmu.frame_seq == start_frame);
+
+    gbjit_ppu_skip_pixels = 0;
 
 #if !GBJIT_PPU_OFFLOAD_THREAD
     /* Synchronous render: the scanlines were drawn during emulation (at each
