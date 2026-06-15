@@ -80,6 +80,8 @@ typedef struct {
     float    flip_ms;   /* worst flip / VSYNC-wait ms */
     float    touch_ms;  /* worst touch ms */
     float    audio_ms;  /* average audio (APU synth) ms */
+    float    msg_busy_ms; /* Core-1 e-paper compute per field (last field) */
+    float    msg_idle_ms; /* Core-1 e-paper DMA-spin per field = offload headroom */
     uint32_t frames;    /* frames in the interval */
     uint32_t skipped;   /* skipped frames in the interval */
 } profiler_hud_t;

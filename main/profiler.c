@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 
 #include "paperboy_config.h"
+#include "msg.h"
 
 static const char *TAG = "prof";
 
@@ -125,6 +126,13 @@ void profiler_frame_end(bool skipped)
 
     float ms_total = ms_frame + ms_touch;
 
+    /* Core-1 e-paper load for the most recent field (busy compute vs idle DMA
+     * spin). idle is the per-field headroom available to offloaded work. */
+    uint32_t c1_busy_us = 0, c1_idle_us = 0, c1_field_us = 0;
+    msg_get_load(&c1_busy_us, &c1_idle_us, &c1_field_us);
+    float ms_c1_busy = (float)c1_busy_us * 0.001f;
+    float ms_c1_idle = (float)c1_idle_us * 0.001f;
+
     const float budget_ms = 17.7f;
     float budget_pct = 100.0f * ms_total / budget_ms;
 
@@ -141,14 +149,18 @@ void profiler_frame_end(bool skipped)
     s_hud.flip_ms  = (float)s_max_us[PROF_FLIP]  * 0.001f;
     s_hud.touch_ms = (float)s_max_us[PROF_TOUCH] * 0.001f;
     s_hud.audio_ms = ms_audio;       /* average over the interval */
+    s_hud.msg_busy_ms = ms_c1_busy;
+    s_hud.msg_idle_ms = ms_c1_idle;
     s_hud.frames   = s_sec_frames;
     s_hud.skipped  = s_sec_skipped;
 
     ESP_LOGI(TAG, "%" PRIu32 " fr (%" PRIu32 " skip) "
              "| cpu %4.1fms  ppu %4.1fms  lcd %4.1fms  flip %4.1fms  touch %4.1fms  audio %4.1fms "
+             "| c1 busy %4.1f idle %4.1f (field %4.1f) "
              "| total %4.1fms / %.1fms budget (%4.1f%%)",
              s_sec_frames, s_sec_skipped,
              ms_cpu, ms_ppu, ms_lcd, ms_flip, ms_touch, ms_audio,
+             ms_c1_busy, ms_c1_idle, (float)c1_field_us * 0.001f,
              ms_total, budget_ms, budget_pct);
 
     /* Reset for next interval. */

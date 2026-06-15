@@ -76,3 +76,10 @@ uint8_t *msg_flip_nowait(void);
 // Monotonic counter incremented at every EPD frame-start (VSYNC).
 // Read before and after rendering to detect a missed VSYNC.
 uint32_t msg_get_vsync_count(void);
+
+// Core-1 load for the most recently completed e-paper field, in microseconds:
+//   busy_us  = time spent computing waveforms (reclaimable only by faster code)
+//   idle_us  = time spent busy-spinning on row DMA (headroom for offloaded work)
+//   field_us = total field driving time (busy + idle)
+// Any pointer may be NULL. Safe to call from another core (atomic word reads).
+void msg_get_load(uint32_t *busy_us, uint32_t *idle_us, uint32_t *field_us);

@@ -857,6 +857,10 @@ void app_main(void)
                     ui_hud_set_line(2, b);
                     snprintf(b, sizeof b, "SND%5.1f TCH%5.1f", h.audio_ms, h.touch_ms);
                     ui_hud_set_line(3, b);
+                    /* Core-1 (e-paper msg task): compute busy vs DMA-spin idle
+                     * per field. Idle = headroom available for offloaded work. */
+                    snprintf(b, sizeof b, "C1B%5.1f C1I%5.1f", h.msg_busy_ms, h.msg_idle_ms);
+                    ui_hud_set_line(4, b);
                 }
                 ui_hud_blit(video_fb);
             }

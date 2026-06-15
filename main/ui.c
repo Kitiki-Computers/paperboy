@@ -217,7 +217,7 @@ void ui_draw_text(uint8_t *fb, int x, int y, const char *s, int fg, int bg)
  * video_fb coordinates a logical pixel (x,y) sits at raw row x, raw col
  * (143-y)*3+i, so the box occupies raw rows [0,HUD_W) and raw byte columns
  * [HUD_BYTE0,HUD_BYTE1). */
-#define HUD_LINES   4
+#define HUD_LINES   5
 #define HUD_COLS    18
 #define HUD_W       (HUD_COLS * CHAR_W)                 /* logical width  -> raw rows */
 #define HUD_H       (HUD_LINES * CHAR_H)                /* logical height -> raw cols */
