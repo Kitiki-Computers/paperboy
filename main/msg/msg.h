@@ -65,6 +65,10 @@
 
 void msg_init(void);
 void msg_start(void);
+// Suspend / resume the e-paper field driver (e.g. to quiesce Core 1 around a
+// blocking flash write). The e-paper holds its image while paused.
+void msg_pause(void);
+void msg_resume(void);
 void msg_display_image(uint8_t *img, bool to_white);
 void msg_enable_video(bool en);
 // Block until the next VSYNC, swap buffers, and return the new back-buffer.

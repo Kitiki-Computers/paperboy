@@ -114,16 +114,38 @@ static void msg_power_off() {
     ets_delay_us(100);
 }
 
+/* Wait for the previous row's DMA to finish, but never forever: a healthy
+ * e-paper row transfer completes in ~12 us, so if dma_done hasn't arrived in
+ * ~1.5 ms the trans-done interrupt was missed and that row is wedged (this can
+ * happen when a flash write on Core 0 stalls the other CPU and masks the i80
+ * ISR, desyncing dma_done from the hardware for one field). Bounding the spin
+ * is what keeps a wedge from freezing the device: with the old 50 ms bound a
+ * single desynced field of ~510 rows stalled the panel for ~25 s; at 1.5 ms the
+ * worst case is <1 s and the field self-resyncs at the next frame. 1.5 ms is
+ * ~100x the real transfer time, so a healthy transfer never trips it. esp_timer
+ * is read only every 16384 spins so the common fast path stays cheap. */
+static inline void IRAM_ATTR dma_wait(void) {
+    uint32_t n = 0;
+    int64_t t0 = 0;
+    while (!dma_done) {
+        if ((++n & 0x3FFFu) == 0u) {
+            int64_t now = esp_timer_get_time();
+            if (t0 == 0) t0 = now;
+            else if (now - t0 > 1500) { dma_done = true; break; }
+        }
+    }
+}
+
 static void IRAM_ATTR msg_send_row(uint8_t *data) {
     // Wait if last line hasn't finished
 #if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
     if (!dma_done) {
         int64_t _t = esp_timer_get_time();
-        while (!dma_done); // Spin loop, shouldn't yield
+        dma_wait();
         s_field_spin_us += (uint32_t)(esp_timer_get_time() - _t);
     }
 #else
-    while (!dma_done); // Spin loop, shouldn't yield
+    dma_wait();
 #endif
 
     gpio_set_level(EPD_GDCK_PIN, 0);
@@ -144,7 +166,6 @@ static void IRAM_ATTR msg_update_task(void *arg) {
     bool img_printed = false;
     uint32_t last_print = 0;
 #endif
-
     while (true) {
 #if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
         int64_t frame_start_us = esp_timer_get_time();
@@ -310,7 +331,7 @@ static void IRAM_ATTR msg_update_task(void *arg) {
 #if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
         if (!dma_done) {
             int64_t _t = esp_timer_get_time();
-            while (!dma_done);
+            dma_wait();
             s_field_spin_us += (uint32_t)(esp_timer_get_time() - _t);
         }
         // Record this field's Core-1 load split (busy compute vs idle DMA spin).
@@ -322,7 +343,7 @@ static void IRAM_ATTR msg_update_task(void *arg) {
                            ? (field_us - s_field_spin_us) : 0u;
         }
 #else
-        while (!dma_done);   // wait for the last row's DMA
+        dma_wait();   // wait for the last row's DMA (bounded)
 #endif
 
 #ifdef TIME_PRINT
@@ -454,16 +475,29 @@ void msg_display_image(uint8_t *img, bool to_white) {
     img_req = true;
 }
 
+static TaskHandle_t s_msg_task = NULL;
+
 void msg_start(void) {
     dma_done = true;
     enable_video = false;
     flip_waiter_task = NULL;
     msg_power_on();
     BaseType_t result = xTaskCreatePinnedToCore(msg_update_task, "msg", 8192,
-            NULL, MSG_TASK_PRIORITY, NULL, 1);
+            NULL, MSG_TASK_PRIORITY, &s_msg_task, 1);
     if (result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create task");
     }
+}
+
+/* Suspend / resume the e-paper field driver. Used to quiesce Core 1 around a
+ * flash write so the flash driver doesn't repeatedly stall a busy, max-priority,
+ * interrupt-disabling task. The e-paper is bistable, so the image persists while
+ * paused. */
+void msg_pause(void) {
+    if (s_msg_task) vTaskSuspend(s_msg_task);
+}
+void msg_resume(void) {
+    if (s_msg_task) { dma_done = true; vTaskResume(s_msg_task); }
 }
 
 void msg_enable_video(bool en) {

@@ -346,9 +346,17 @@ static bool save_game_persist(const char *rom_path)
         return false;
     }
 
-    persist_data = (uint8_t *)heap_caps_malloc(persist_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* Prefer INTERNAL RAM for the flash-write source buffer (the proper place
+     * for a flash source), falling back to PSRAM for very large cart RAM that
+     * won't fit. Note: the source location is NOT what made saves slow — the
+     * 23 s freeze came from the e-paper Core-1 task contending with the flash
+     * driver's "stall other CPU"; that is fixed by msg_pause() around the I/O. */
+    persist_data = (uint8_t *)heap_caps_malloc(persist_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (persist_data == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate %u-byte save buffer in SPIRAM", (unsigned)persist_size);
+        persist_data = (uint8_t *)heap_caps_malloc(persist_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (persist_data == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate %u-byte save buffer", (unsigned)persist_size);
         return false;
     }
 
@@ -358,24 +366,35 @@ static bool save_game_persist(const char *rom_path)
         goto out;
     }
 
+    /* Quiesce the e-paper Core-1 task for the duration of the flash write. The
+     * flash driver must stall the other CPU for every erase/program; the
+     * e-paper task busy-loops at max priority and disables interrupts during
+     * audio synthesis, so leaving it running inflates each flash op to ~2 s and
+     * froze the device for ~23 s per 32 KB save. Paused, the same save takes
+     * ~0.3 s; the bistable panel holds its image meanwhile. */
+    msg_pause();
     save_file = fopen(save_path, "wb");
     if (save_file == NULL) {
         ESP_LOGE(TAG, "Failed to open save file: %s", save_path);
+        msg_resume();
         goto out;
     }
 
     written = fwrite(persist_data, 1, persist_size, save_file);
     if (written != persist_size) {
         ESP_LOGE(TAG, "Short save write: %u/%u", (unsigned)written, (unsigned)persist_size);
+        msg_resume();
         goto out;
     }
 
     if (fclose(save_file) != 0) {
         save_file = NULL;
         ESP_LOGE(TAG, "Failed to close save file: %s", save_path);
+        msg_resume();
         goto out;
     }
     save_file = NULL;
+    msg_resume();
 
     paperboy_gb_persist_mark_clean();
     ESP_LOGI(TAG, "Saved persist data to %s (%u bytes)", save_path, (unsigned)persist_size);
