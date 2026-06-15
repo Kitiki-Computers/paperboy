@@ -10,6 +10,7 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_vfs_fat.h"
+#include "wear_levelling.h"
 #include <esp_timer.h>
 #include "driver/spi_common.h"
 #include "driver/sdspi_host.h"
@@ -126,6 +127,28 @@ static esp_err_t sdcard_mount(void)
 
     sdmmc_card_print_info(stdout, s_sd_card);
     ESP_LOGI(TAG, "Mounted SD card on %s", SD_MOUNT_POINT);
+    return ESP_OK;
+}
+
+/* Internal-flash FAT for battery saves on the embedded-autoboot path (no SD).
+ * Mounts the "storage" partition (partitions.csv) at FLASH_MOUNT_POINT,
+ * formatting it on first use. */
+#define FLASH_MOUNT_POINT "/flash"
+static wl_handle_t s_flash_wl = WL_INVALID_HANDLE;
+static esp_err_t flash_storage_mount(void)
+{
+    esp_vfs_fat_mount_config_t cfg = {
+        .format_if_mount_failed = true,
+        .max_files = 4,
+        .allocation_unit_size = 4096,
+    };
+    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(
+        FLASH_MOUNT_POINT, "storage", &cfg, &s_flash_wl);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "flash storage mount failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "Mounted flash storage on %s", FLASH_MOUNT_POINT);
     return ESP_OK;
 }
 
@@ -660,11 +683,21 @@ void app_main(void)
         extern const uint8_t _binary_autoboot_rom_gb_end[]   asm("_binary_autoboot_rom_gb_end");
         rom_data = _binary_autoboot_rom_gb_start;
         rom_size = (size_t)(_binary_autoboot_rom_gb_end - _binary_autoboot_rom_gb_start);
-        strlcpy(s_rom_path, "/embedded/autoboot.gb", sizeof(s_rom_path));
+        /* Save (.sav) goes to internal flash since there's no SD here; the path's
+         * directory must be the mounted FAT, so derive it from FLASH_MOUNT_POINT. */
+        strlcpy(s_rom_path, FLASH_MOUNT_POINT "/autoboot.gb", sizeof(s_rom_path));
         ESP_LOGW(TAG, "AUTOBOOT: embedded ROM (%u bytes), bypassing SD picker", (unsigned)rom_size);
         gb_ok = paperboy_gb_init(rom_data, rom_size);
-        if (gb_ok) paperboy_gb_set_buttons(0);
-        else ESP_LOGE(TAG, "AUTOBOOT: gb init failed: %s", paperboy_gb_last_error());
+        if (gb_ok) {
+            paperboy_gb_set_buttons(0);
+            /* Mount flash storage and restore battery-backed cart RAM, if any. */
+            if (flash_storage_mount() == ESP_OK && paperboy_gb_has_persist()) {
+                if (load_game_persist(s_rom_path))
+                    ESP_LOGI(TAG, "AUTOBOOT: restored battery save");
+            }
+        } else {
+            ESP_LOGE(TAG, "AUTOBOOT: gb init failed: %s", paperboy_gb_last_error());
+        }
     }
     (void)sd_err;
 #else
@@ -758,6 +791,11 @@ void app_main(void)
 
     int skip_count = 0;
 
+    /* Debounce timer for auto-flushing battery-backed cart RAM to flash: set to
+     * the time cart RAM first went dirty; flushed ~2s later so an in-game save's
+     * write burst coalesces into a single flash write. 0 = clean. */
+    int64_t save_dirty_since = 0;
+
     /* Obtain the first back-buffer and record the current VSYNC epoch. */
     uint8_t *video_fb = msg_flip();
     uint32_t vsync_ref = msg_get_vsync_count();
@@ -827,6 +865,22 @@ void app_main(void)
         PROF_END(PROF_FRAME);
 
         dbg_console_after_frame(paperboy_gb_debug_lcd());
+
+        /* Auto-flush battery-backed cart RAM to flash, debounced ~2s after the
+         * game last started writing it (so an in-game save's burst becomes one
+         * flash write instead of many). save_game_persist marks it clean. */
+        if (paperboy_gb_has_persist() && paperboy_gb_persist_is_dirty()) {
+            int64_t now = esp_timer_get_time();
+            if (save_dirty_since == 0) {
+                save_dirty_since = now;
+            } else if (now - save_dirty_since > 2000000) {
+                if (save_game_persist(s_rom_path))
+                    ESP_LOGI(TAG, "auto-saved battery RAM");
+                save_dirty_since = 0;
+            }
+        } else {
+            save_dirty_since = 0;
+        }
 
         /* Battery-low overlay: overwrite the top row of the game frame. */
         if (!skip_render && battery_is_low()) {

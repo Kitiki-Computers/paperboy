@@ -147,6 +147,23 @@ static void parse_line(char *line) {
         printf("[subframes] max=%lu\n",
                (unsigned long)paperboy_jit_get_max_subframes());
         fflush(stdout);
+    } else if (cmd == 'w') {
+        /* Battery-save test: fill cart RAM with a deterministic pattern (seed
+         * from arg) + mark dirty (the main loop auto-flushes to flash ~2s
+         * later). Reports the checksum to compare against after a reboot. */
+        extern uint32_t paperboy_jit_cartram_fill_test(uint32_t);
+        uint32_t seed = (uint32_t)strtoul(arg, NULL, 10);
+        uint32_t sum = paperboy_jit_cartram_fill_test(seed);
+        printf("[sav] filled seed=%lu checksum=%lu\n",
+               (unsigned long)seed, (unsigned long)sum);
+        fflush(stdout);
+    } else if (cmd == 'r') {
+        /* Report current cart-RAM checksum (after reboot it should match the
+         * 'w' checksum if the battery save was restored from flash). */
+        extern uint32_t paperboy_jit_cartram_checksum(void);
+        printf("[sav] checksum=%lu\n",
+               (unsigned long)paperboy_jit_cartram_checksum());
+        fflush(stdout);
     } else if (cmd == 'h') {
         /* Toggle the on-screen perf HUD. */
 #if PAPERBOY_PERF_HUD
@@ -186,7 +203,7 @@ void dbg_console_init(void) {
     s_window_start_us = s_last_us;
     xTaskCreatePinnedToCore(rx_task, "dbg_rx", 3072, NULL,
                             tskIDLE_PRIORITY + 1, NULL, 0 /* Core 0 */);
-    printf("\n[dbg] console ready: b/t/f/s/z/v/j/h/c/p/m\n");
+    printf("\n[dbg] console ready: b/t/f/s/z/v/j/h/c/p/m/w/r\n");
 }
 
 uint8_t dbg_console_button_mask(void) { return s_btn; }

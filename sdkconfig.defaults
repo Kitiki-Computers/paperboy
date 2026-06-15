@@ -35,8 +35,11 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # Release build.
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
-# Large single-app partition (no OTA); the firmware embeds image assets and
-# both emulator cores, so the default ~1 MB app partition is too small.
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Custom partition table (partitions.csv): a 2.5 MB factory app partition (fits
+# the firmware + an embedded ROM up to ROM_SIZE_MAX, e.g. 1 MB Pokemon) plus a
+# 1 MB FAT "storage" partition for battery-save (.sav) files on the embedded
+# autoboot path (no SD card). The default ~1 MB app partition is too small.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESP_WIFI_ENABLED=n
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y

@@ -241,41 +241,74 @@ static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
     return true;
 }
 
+/* Battery-backed cart RAM persistence. The .sav payload is the raw external
+ * RAM (standard emulator .sav format), so it interoperates with other tools.
+ * The RTC (Gen-2 only; not the carts we support) is not serialized. */
 static bool gbjit_has_persist(void)
 {
-    return false;
+    return s_ready && s_mmu.cart_ram != NULL && s_mmu.cart_ram_size > 0
+        && s_mmu.has_battery;
 }
 
 static size_t gbjit_persist_size(void)
 {
-    return 0;
+    return gbjit_has_persist() ? (size_t)s_mmu.cart_ram_size : 0u;
 }
 
 static bool gbjit_persist_is_dirty(void)
 {
-    return false;
+    return gbjit_has_persist() && s_mmu.cart_ram_dirty != 0u;
 }
 
 static bool gbjit_persist_export(uint8_t *dst, size_t dst_size, uint32_t timestamp)
 {
-    (void)dst;
-    (void)dst_size;
     (void)timestamp;
-    set_last_error("persist not implemented for gbjit");
-    return false;
+    if (!gbjit_has_persist()) { set_last_error("no battery RAM"); return false; }
+    if (dst == NULL || dst_size < s_mmu.cart_ram_size) {
+        set_last_error("persist dst too small");
+        return false;
+    }
+    memcpy(dst, s_mmu.cart_ram, s_mmu.cart_ram_size);
+    return true;
 }
 
 static bool gbjit_persist_import(const uint8_t *src, size_t src_size, uint32_t current_timestamp)
 {
-    (void)src;
-    (void)src_size;
     (void)current_timestamp;
-    set_last_error("persist not implemented for gbjit");
-    return false;
+    if (!gbjit_has_persist()) { set_last_error("no battery RAM"); return false; }
+    if (src == NULL || src_size != s_mmu.cart_ram_size) {
+        set_last_error("persist src size mismatch");
+        return false;
+    }
+    memcpy(s_mmu.cart_ram, src, s_mmu.cart_ram_size);
+    s_mmu.cart_ram_dirty = 0u;     /* freshly loaded == clean */
+    return true;
 }
 
 static void gbjit_persist_mark_clean(void)
 {
+    s_mmu.cart_ram_dirty = 0u;
+}
+
+/* Test helpers for validating flash persistence without driving a game's
+ * in-game save UI (debug console 'w'/'r'). 'fill' writes a deterministic
+ * pattern into cart RAM + marks it dirty; 'checksum' returns a 32-bit sum for
+ * round-trip verification across a reboot. No-ops without battery RAM. */
+uint32_t paperboy_jit_cartram_checksum(void)
+{
+    if (s_mmu.cart_ram == NULL || s_mmu.cart_ram_size == 0) return 0;
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < s_mmu.cart_ram_size; i++) sum += s_mmu.cart_ram[i];
+    return sum;
+}
+
+uint32_t paperboy_jit_cartram_fill_test(uint32_t seed)
+{
+    if (s_mmu.cart_ram == NULL || s_mmu.cart_ram_size == 0) return 0;
+    for (uint32_t i = 0; i < s_mmu.cart_ram_size; i++)
+        s_mmu.cart_ram[i] = (uint8_t)((i * 31u + seed) & 0xFFu);
+    s_mmu.cart_ram_dirty = 1u;
+    return paperboy_jit_cartram_checksum();
 }
 
 static size_t gbjit_state_size(void)
