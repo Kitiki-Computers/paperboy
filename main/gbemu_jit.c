@@ -292,6 +292,37 @@ static const char *gbjit_last_error(void)
     return s_last_error;
 }
 
+/* Runtime tuning hook for the per-frame compile budget (see dispatcher.h).
+ * Used by the debug console 'c <n>' command to sweep values without reflashing.
+ * 0 = unlimited. */
+void paperboy_jit_set_compile_budget(uint32_t budget)
+{
+    s_dispatcher.compile_budget = budget;
+}
+
+uint32_t paperboy_jit_get_compile_budget(void)
+{
+    return s_dispatcher.compile_budget;
+}
+
+/* Runtime tuning for the static-successor prefetcher. depth 0 disables it
+ * (on-demand compiles only); depth>0 enables it to the given recursion depth.
+ * Debug-console 'p <n>'. */
+void paperboy_jit_set_prefetch_depth(uint32_t depth)
+{
+    if (depth == 0) {
+        s_dispatcher.prefetch_enabled = false;
+    } else {
+        s_dispatcher.prefetch_enabled = true;
+        s_dispatcher.prefetch_depth = (uint8_t)depth;
+    }
+}
+
+uint32_t paperboy_jit_get_prefetch_depth(void)
+{
+    return s_dispatcher.prefetch_enabled ? s_dispatcher.prefetch_depth : 0;
+}
+
 static bool gbjit_get_stats(paperboy_gb_stats_t *stats)
 {
     if (stats == NULL) {

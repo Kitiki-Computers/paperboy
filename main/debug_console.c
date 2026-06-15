@@ -48,6 +48,14 @@ static int64_t  s_window_start_us = 0;
 static uint32_t s_window_frames = 0;
 static double   s_min_window_fps = 1e9;
 
+/* Per-frame time ring for the "1% low FPS" metric (average frame time of the
+ * slowest 1% of frames, expressed as fps — the standard gaming 1%-low). Debug
+ * scratch -> PSRAM. 4096 entries ~= 90s @ 45fps; older frames roll off. */
+#define FT_RING 4096
+static EXT_RAM_BSS_ATTR uint32_t s_ft_ring[FT_RING];
+static uint32_t s_ft_count = 0;   /* total frames recorded (for k = count/100) */
+static uint32_t s_ft_head  = 0;   /* next write index (wraps) */
+
 /* Framebuffer-dump scratch (~11.5 KB), debug-only -> PSRAM. */
 static EXT_RAM_BSS_ATTR char s_hex[GB_W * GB_H / 4 * 2 + 1];   /* 11520 + NUL */
 
@@ -109,6 +117,26 @@ static void parse_line(char *line) {
                    (long long)esp_timer_get_time());
             fflush(stdout);
         }
+    } else if (cmd == 'c') {
+        /* Set the JIT per-frame compile budget (0 = unlimited). Tunes the
+         * worst-case ("1% low") frame time by capping compiles per frame. */
+        extern void paperboy_jit_set_compile_budget(uint32_t);
+        extern uint32_t paperboy_jit_get_compile_budget(void);
+        uint32_t b = (uint32_t)strtoul(arg, NULL, 10);
+        paperboy_jit_set_compile_budget(b);
+        printf("[budget] compile_budget=%lu\n",
+               (unsigned long)paperboy_jit_get_compile_budget());
+        fflush(stdout);
+    } else if (cmd == 'p') {
+        /* Set JIT prefetch depth (0 = disable prefetch). Trades steady-state
+         * warmth for smaller compile bursts (better 1% low). */
+        extern void paperboy_jit_set_prefetch_depth(uint32_t);
+        extern uint32_t paperboy_jit_get_prefetch_depth(void);
+        uint32_t p = (uint32_t)strtoul(arg, NULL, 10);
+        paperboy_jit_set_prefetch_depth(p);
+        printf("[prefetch] depth=%lu\n",
+               (unsigned long)paperboy_jit_get_prefetch_depth());
+        fflush(stdout);
     } else if (cmd == 'h') {
         /* Toggle the on-screen perf HUD. */
 #if PAPERBOY_PERF_HUD
@@ -148,7 +176,7 @@ void dbg_console_init(void) {
     s_window_start_us = s_last_us;
     xTaskCreatePinnedToCore(rx_task, "dbg_rx", 3072, NULL,
                             tskIDLE_PRIORITY + 1, NULL, 0 /* Core 0 */);
-    printf("\n[dbg] console ready: b/t/f/s/z/v/j/h\n");
+    printf("\n[dbg] console ready: b/t/f/s/z/v/j/h/c\n");
 }
 
 uint8_t dbg_console_button_mask(void) { return s_btn; }
@@ -187,12 +215,16 @@ void dbg_console_after_frame(const uint8_t *gb_fb) {
     if (s_reset_req) {
         s_worst_us = 0; s_sum_us = 0; s_frames = 0;
         s_window_start_us = now; s_window_frames = 0; s_min_window_fps = 1e9;
+        s_ft_count = 0; s_ft_head = 0;
         s_reset_req = false;
         dt = 0;
     }
     if (dt > 0) {
         s_frames++; s_sum_us += dt;
         if (dt > s_worst_us) s_worst_us = dt;
+        s_ft_ring[s_ft_head] = dt;
+        s_ft_head = (s_ft_head + 1) % FT_RING;
+        s_ft_count++;
         s_window_frames++;
         if (now - s_window_start_us >= 1000000) {
             double fps = s_window_frames * 1e6 / (double)(now - s_window_start_us);
@@ -209,9 +241,44 @@ void dbg_console_after_frame(const uint8_t *gb_fb) {
     if (s_stats_req) {
         double avg_fps = s_frames ? (s_frames * 1e6 / (double)s_sum_us) : 0.0;
         double worst_fps = s_worst_us ? (1e6 / (double)s_worst_us) : 0.0;
-        printf("[stats] frames=%lu avg_fps=%.1f worst_frame=%lu us (worst_inst_fps=%.1f) min_1s_fps=%.1f\n",
+
+        /* 1% low FPS: average frame time of the slowest 1% of frames. Find the
+         * k = max(1, n/100) largest entries via a small ascending top-k buffer
+         * (top[0] is the smallest of the current top-k); average them. */
+        uint32_t n = (s_ft_count < FT_RING) ? s_ft_count : FT_RING;
+        double low1_fps = 0.0, low01_fps = 0.0;
+        if (n > 0) {
+            uint32_t k = n / 100; if (k < 1) k = 1;
+            uint32_t k01 = n / 1000; if (k01 < 1) k01 = 1;
+            if (k  > 64) k  = 64;
+            if (k01 > 64) k01 = 64;
+            static uint32_t top[64];
+            for (uint32_t i = 0; i < k; i++) top[i] = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t v = s_ft_ring[i];
+                if (v > top[0]) {
+                    top[0] = v;
+                    /* sift the new smallest up so top[] stays ascending */
+                    for (uint32_t j = 1; j < k && top[j] < top[j-1]; j++) {
+                        uint32_t t = top[j]; top[j] = top[j-1]; top[j-1] = t;
+                    }
+                }
+            }
+            uint64_t sum = 0; for (uint32_t i = 0; i < k; i++) sum += top[i];
+            double avg_worst = (double)sum / (double)k;
+            low1_fps = avg_worst > 0 ? (1e6 / avg_worst) : 0.0;
+            /* worst 0.1% = average of the worst k01 (subset of top[], which is
+             * ascending, so the largest k01 are the tail). */
+            if (k01 > k) k01 = k;
+            uint64_t s01 = 0; for (uint32_t i = k - k01; i < k; i++) s01 += top[i];
+            double avg01 = (double)s01 / (double)k01;
+            low01_fps = avg01 > 0 ? (1e6 / avg01) : 0.0;
+        }
+
+        printf("[stats] frames=%lu avg_fps=%.1f worst_frame=%lu us (worst_inst_fps=%.1f) min_1s_fps=%.1f low1%%_fps=%.1f low0.1%%_fps=%.1f\n",
                (unsigned long)s_frames, avg_fps, (unsigned long)s_worst_us, worst_fps,
-               (s_min_window_fps < 1e8) ? s_min_window_fps : 0.0);
+               (s_min_window_fps < 1e8) ? s_min_window_fps : 0.0,
+               low1_fps, low01_fps);
         fflush(stdout);
         s_stats_req = false;
     }

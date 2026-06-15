@@ -157,10 +157,14 @@ void profiler_frame_end(bool skipped)
     ESP_LOGI(TAG, "%" PRIu32 " fr (%" PRIu32 " skip) "
              "| cpu %4.1fms  ppu %4.1fms  lcd %4.1fms  flip %4.1fms  touch %4.1fms  audio %4.1fms "
              "| c1 busy %4.1f idle %4.1f (field %4.1f) "
+             "| max frame %5.1f cpu %5.1f ppu %4.1f "
              "| total %4.1fms / %.1fms budget (%4.1f%%)",
              s_sec_frames, s_sec_skipped,
              ms_cpu, ms_ppu, ms_lcd, ms_flip, ms_touch, ms_audio,
              ms_c1_busy, ms_c1_idle, (float)c1_field_us * 0.001f,
+             (float)s_max_us[PROF_FRAME] * 0.001f,
+             (float)s_max_cpu_us * 0.001f,
+             (float)s_max_us[PROF_PPU] * 0.001f,
              ms_total, budget_ms, budget_pct);
 
     /* Reset for next interval. */
