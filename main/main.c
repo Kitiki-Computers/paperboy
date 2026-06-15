@@ -10,6 +10,7 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_vfs_fat.h"
+#include "wear_levelling.h"
 #include <esp_timer.h>
 #include "driver/spi_common.h"
 #include "driver/sdspi_host.h"
@@ -24,8 +25,21 @@
 #include "ui.h"
 #include "battery.h"
 #include "profiler.h"
+#include "debug_console.h"
+#include "lockstep_diff.h"
 
 static const char *TAG = "paperboy";
+
+/* Normally set by main/CMakeLists.txt (defaults to PAPERBOY_DEBUG). Fallback off
+ * for a release build if it ever reaches here undefined. */
+#ifndef PAPERBOY_PERF_HUD
+#define PAPERBOY_PERF_HUD 0
+#endif
+#if PAPERBOY_PERF_HUD
+/* Perf HUD on/off at runtime (toggle with the 'h' debug-console command).
+ * Non-static so debug_console.c can flip it. */
+bool g_perf_hud = true;
+#endif
 static sdmmc_card_t *s_sd_card;
 static uint8_t *s_rom_data;
 static size_t s_rom_size;
@@ -115,6 +129,28 @@ static esp_err_t sdcard_mount(void)
 
     sdmmc_card_print_info(stdout, s_sd_card);
     ESP_LOGI(TAG, "Mounted SD card on %s", SD_MOUNT_POINT);
+    return ESP_OK;
+}
+
+/* Internal-flash FAT for battery saves on the embedded-autoboot path (no SD).
+ * Mounts the "storage" partition (partitions.csv) at FLASH_MOUNT_POINT,
+ * formatting it on first use. */
+#define FLASH_MOUNT_POINT "/flash"
+static wl_handle_t s_flash_wl = WL_INVALID_HANDLE;
+static esp_err_t flash_storage_mount(void)
+{
+    esp_vfs_fat_mount_config_t cfg = {
+        .format_if_mount_failed = true,
+        .max_files = 4,
+        .allocation_unit_size = 4096,
+    };
+    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(
+        FLASH_MOUNT_POINT, "storage", &cfg, &s_flash_wl);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "flash storage mount failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "Mounted flash storage on %s", FLASH_MOUNT_POINT);
     return ESP_OK;
 }
 
@@ -310,9 +346,17 @@ static bool save_game_persist(const char *rom_path)
         return false;
     }
 
-    persist_data = (uint8_t *)heap_caps_malloc(persist_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* Prefer INTERNAL RAM for the flash-write source buffer (the proper place
+     * for a flash source), falling back to PSRAM for very large cart RAM that
+     * won't fit. Note: the source location is NOT what made saves slow — the
+     * 23 s freeze came from the e-paper Core-1 task contending with the flash
+     * driver's "stall other CPU"; that is fixed by msg_pause() around the I/O. */
+    persist_data = (uint8_t *)heap_caps_malloc(persist_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (persist_data == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate %u-byte save buffer in SPIRAM", (unsigned)persist_size);
+        persist_data = (uint8_t *)heap_caps_malloc(persist_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (persist_data == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate %u-byte save buffer", (unsigned)persist_size);
         return false;
     }
 
@@ -322,24 +366,35 @@ static bool save_game_persist(const char *rom_path)
         goto out;
     }
 
+    /* Quiesce the e-paper Core-1 task for the duration of the flash write. The
+     * flash driver must stall the other CPU for every erase/program; the
+     * e-paper task busy-loops at max priority and disables interrupts during
+     * audio synthesis, so leaving it running inflates each flash op to ~2 s and
+     * froze the device for ~23 s per 32 KB save. Paused, the same save takes
+     * ~0.3 s; the bistable panel holds its image meanwhile. */
+    msg_pause();
     save_file = fopen(save_path, "wb");
     if (save_file == NULL) {
         ESP_LOGE(TAG, "Failed to open save file: %s", save_path);
+        msg_resume();
         goto out;
     }
 
     written = fwrite(persist_data, 1, persist_size, save_file);
     if (written != persist_size) {
         ESP_LOGE(TAG, "Short save write: %u/%u", (unsigned)written, (unsigned)persist_size);
+        msg_resume();
         goto out;
     }
 
     if (fclose(save_file) != 0) {
         save_file = NULL;
         ESP_LOGE(TAG, "Failed to close save file: %s", save_path);
+        msg_resume();
         goto out;
     }
     save_file = NULL;
+    msg_resume();
 
     paperboy_gb_persist_mark_clean();
     ESP_LOGI(TAG, "Saved persist data to %s (%u bytes)", save_path, (unsigned)persist_size);
@@ -630,6 +685,43 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(200));
     msg_enable_video(true);
 
+#if defined(PAPERBOY_LOCKSTEP_DIFF) && PAPERBOY_LOCKSTEP_DIFF
+    {
+        extern const uint8_t _binary_autoboot_rom_gb_start[] asm("_binary_autoboot_rom_gb_start");
+        extern const uint8_t _binary_autoboot_rom_gb_end[]   asm("_binary_autoboot_rom_gb_end");
+        lockstep_diff_run(_binary_autoboot_rom_gb_start,
+                          (size_t)(_binary_autoboot_rom_gb_end - _binary_autoboot_rom_gb_start));
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+#endif
+
+#if defined(PAPERBOY_AUTOBOOT_EMBEDDED) && PAPERBOY_AUTOBOOT_EMBEDDED
+    /* On-device verification path: boot an embedded ROM directly, bypassing
+     * the SD card and the touch-driven picker. Enabled at configure time via
+     * -DPAPERBOY_AUTOBOOT_ROM=<file> (see main/CMakeLists.txt). */
+    {
+        extern const uint8_t _binary_autoboot_rom_gb_start[] asm("_binary_autoboot_rom_gb_start");
+        extern const uint8_t _binary_autoboot_rom_gb_end[]   asm("_binary_autoboot_rom_gb_end");
+        rom_data = _binary_autoboot_rom_gb_start;
+        rom_size = (size_t)(_binary_autoboot_rom_gb_end - _binary_autoboot_rom_gb_start);
+        /* Save (.sav) goes to internal flash since there's no SD here; the path's
+         * directory must be the mounted FAT, so derive it from FLASH_MOUNT_POINT. */
+        strlcpy(s_rom_path, FLASH_MOUNT_POINT "/autoboot.gb", sizeof(s_rom_path));
+        ESP_LOGW(TAG, "AUTOBOOT: embedded ROM (%u bytes), bypassing SD picker", (unsigned)rom_size);
+        gb_ok = paperboy_gb_init(rom_data, rom_size);
+        if (gb_ok) {
+            paperboy_gb_set_buttons(0);
+            /* Mount flash storage and restore battery-backed cart RAM, if any. */
+            if (flash_storage_mount() == ESP_OK && paperboy_gb_has_persist()) {
+                if (load_game_persist(s_rom_path))
+                    ESP_LOGI(TAG, "AUTOBOOT: restored battery save");
+            }
+        } else {
+            ESP_LOGE(TAG, "AUTOBOOT: gb init failed: %s", paperboy_gb_last_error());
+        }
+    }
+    (void)sd_err;
+#else
     sd_err = sdcard_mount();
     if (sd_err == ESP_OK) {
         char rom_path[256] = {0};
@@ -698,6 +790,7 @@ void app_main(void)
     } else {
         ESP_LOGW(TAG, "SD init skipped, falling back to built-in stub ROM");
     }
+#endif /* PAPERBOY_AUTOBOOT_EMBEDDED */
 
     if (rom_data == NULL) {
         gb_ok = paperboy_gb_init(rom_data, rom_size);
@@ -711,11 +804,18 @@ void app_main(void)
     ESP_LOGI(TAG, "Entering GB render loop");
     ESP_LOGI(TAG, "GB backend: %s", paperboy_gb_backend_name());
 
+    dbg_console_init();
+
     /* Maximum number of consecutive rendered frames that may be skipped
      * (video output suppressed) when the emulator falls behind VSYNC. */
     #define MAX_FRAME_SKIPS 2
 
     int skip_count = 0;
+
+    /* Debounce timer for auto-flushing battery-backed cart RAM to flash: set to
+     * the time cart RAM first went dirty; flushed ~2s later so an in-game save's
+     * write burst coalesces into a single flash write. 0 = clean. */
+    int64_t save_dirty_since = 0;
 
     /* Obtain the first back-buffer and record the current VSYNC epoch. */
     uint8_t *video_fb = msg_flip();
@@ -738,7 +838,7 @@ void app_main(void)
         /* Poll touchscreen and update GB button state every emulated frame. */
         PROF_BEGIN(PROF_TOUCH);
         touch_state = tp_read_state();
-        paperboy_gb_set_buttons(touch_state.gb_buttons);
+        paperboy_gb_set_buttons(touch_state.gb_buttons | dbg_console_button_mask());
         PROF_END(PROF_TOUCH);
 
         action_edges = touch_state.actions & (uint8_t)~prev_actions;
@@ -785,10 +885,62 @@ void app_main(void)
         }
         PROF_END(PROF_FRAME);
 
+        dbg_console_after_frame(paperboy_gb_debug_lcd());
+
+        /* Auto-flush battery-backed cart RAM to flash, debounced ~2s after the
+         * game last started writing it (so an in-game save's burst becomes one
+         * flash write instead of many). save_game_persist marks it clean. */
+        if (paperboy_gb_has_persist() && paperboy_gb_persist_is_dirty()) {
+            int64_t now = esp_timer_get_time();
+            if (save_dirty_since == 0) {
+                save_dirty_since = now;
+            } else if (now - save_dirty_since > 2000000) {
+                if (save_game_persist(s_rom_path))
+                    ESP_LOGI(TAG, "auto-saved battery RAM");
+                save_dirty_since = 0;
+            }
+        } else {
+            save_dirty_since = 0;
+        }
+
         /* Battery-low overlay: overwrite the top row of the game frame. */
         if (!skip_render && battery_is_low()) {
             ui_draw_bat_low_overlay(video_fb);
         }
+
+#if PAPERBOY_PERF_HUD
+        /* Perf HUD: worst-case timing overlaid on the top-left of the frame,
+         * refreshed ~1 Hz (the profiler interval). All times are the WORST
+         * single frame in the last second; FPS is current/min. Drawn into the
+         * live video_fb each rendered frame (the buffer is redrawn anyway).
+         * Toggle at runtime with the debug console 'h' command. */
+        if (!skip_render && g_perf_hud) {
+            profiler_hud_t h;
+            profiler_get_hud(&h);
+            if (h.valid) {
+                /* Re-render the HUD text only when the profiler publishes new
+                 * values (~1 Hz); blit the cached strip every frame. */
+                static uint32_t last_gen = 0xFFFFFFFFu;
+                if (h.gen != last_gen) {
+                    last_gen = h.gen;
+                    char b[28];
+                    snprintf(b, sizeof b, "FPS %2.0f/%2.0f", h.fps_cur, h.fps_min);
+                    ui_hud_set_line(0, b);
+                    snprintf(b, sizeof b, "CPU%5.1f PPU%5.1f", h.cpu_ms, h.ppu_ms);
+                    ui_hud_set_line(1, b);
+                    snprintf(b, sizeof b, "LCD%5.1f FLP%5.1f", h.lcd_ms, h.flip_ms);
+                    ui_hud_set_line(2, b);
+                    snprintf(b, sizeof b, "SND%5.1f TCH%5.1f", h.audio_ms, h.touch_ms);
+                    ui_hud_set_line(3, b);
+                    /* Core-1 (e-paper msg task): compute busy vs DMA-spin idle
+                     * per field. Idle = headroom available for offloaded work. */
+                    snprintf(b, sizeof b, "C1B%5.1f C1I%5.1f", h.msg_busy_ms, h.msg_idle_ms);
+                    ui_hud_set_line(4, b);
+                }
+                ui_hud_blit(video_fb);
+            }
+        }
+#endif
 
         /* Check whether at least one VSYNC fired while we were rendering. */
         bool missed = (msg_get_vsync_count() != vsync_ref);

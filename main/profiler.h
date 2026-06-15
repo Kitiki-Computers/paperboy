@@ -62,6 +62,42 @@ void profiler_frame_end(bool skipped);
  */
 void profiler_audio_add(int64_t elapsed_us);
 
-/* Convenience macros */
+/*
+ * Live HUD snapshot, refreshed once per second inside profiler_frame_end().
+ * All *_ms fields are the WORST (max) single-frame value seen over the last
+ * interval (except audio_ms, which is the interval average — audio is timed
+ * cross-core and accumulated per second). Times are milliseconds.
+ */
+typedef struct {
+    bool     valid;     /* false until the first interval has elapsed */
+    uint32_t gen;       /* bumps each publish (~1 Hz); for change detection */
+    float    fps_cur;   /* average fps over the interval */
+    float    fps_min;   /* worst single-frame fps (1e6 / longest frame) */
+    float    frame_ms;  /* worst full paperboy_gb_run_frame() ms */
+    float    cpu_ms;    /* worst pure-CPU ms (frame - lcd - ppu) */
+    float    ppu_ms;    /* worst PPU ms */
+    float    lcd_ms;    /* worst LCD/blit ms */
+    float    flip_ms;   /* worst flip / VSYNC-wait ms */
+    float    touch_ms;  /* worst touch ms */
+    float    audio_ms;  /* average audio (APU synth) ms */
+    float    msg_busy_ms; /* Core-1 e-paper compute per field (last field) */
+    float    msg_idle_ms; /* Core-1 e-paper DMA-spin per field = offload headroom */
+    uint32_t frames;    /* frames in the interval */
+    uint32_t skipped;   /* skipped frames in the interval */
+} profiler_hud_t;
+
+/* Copy the latest published HUD snapshot. Cheap; call every frame. */
+void profiler_get_hud(profiler_hud_t *out);
+
+/* Convenience macros. In a release build (PAPERBOY_DEBUG=0) these compile to
+ * nothing, so the per-phase esp_timer_get_time() reads on the hot paths
+ * (ppu_tick, per-frame, per-line blit) cost zero. PAPERBOY_DEBUG comes from the
+ * CMake compile-definition; profiler.h is also pulled into the gbjit submodule
+ * (core/ppu.c), which is compiled in the same component and so sees it. */
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
 #define PROF_BEGIN(phase)  profiler_begin(phase)
 #define PROF_END(phase)    profiler_end(phase)
+#else
+#define PROF_BEGIN(phase)  ((void)0)
+#define PROF_END(phase)    ((void)0)
+#endif

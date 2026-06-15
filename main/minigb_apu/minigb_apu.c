@@ -33,10 +33,23 @@
 
 #define MAX_CHAN_VOLUME		15
 
+/* Upper bound on iterations of the per-sample `while (update_freq())` loops in
+ * update_square/wave/noise. For any legitimate channel frequency the loop runs
+ * at most ~64 times per output sample; this cap only ever triggers when the APU
+ * state has been driven into a pathological value (e.g. a cross-core register
+ * race against the synthesis, which runs in the e-paper msg task). Without it a
+ * single corrupted `freq_inc` can spin the synthesis — and therefore the whole
+ * e-paper task — for seconds, which looked like a hang after a game's intro. */
+#define APU_FREQ_GUARD		2048u
+
 static IRAM_ATTR void set_note_freq(struct chan *c)
 {
-	/* Lowest expected value of freq is 64. */
-	uint32_t freq = (DMG_CLOCK_FREQ_U / 4) / (2048 - c->freq);
+	/* freq register is 11-bit, so (2048 - c->freq) is normally 1..2048. Guard
+	 * the divisor: a torn cross-core read of c->freq can momentarily land on
+	 * 2048 (divide-by-zero -> CPU exception) or beyond; clamp to 1 so the worst
+	 * case is one slightly-wrong sample instead of a crash. */
+	uint32_t denom = (c->freq < 2048u) ? (2048u - c->freq) : 1u;
+	uint32_t freq = (DMG_CLOCK_FREQ_U / 4) / denom;
 	c->freq_inc = freq * (uint32_t)(FREQ_INC_REF / AUDIO_SAMPLE_RATE);
 }
 
@@ -145,8 +158,10 @@ static IRAM_ATTR void update_square(struct minigb_apu_ctx *ctx, audio_sample_t *
 		uint32_t pos = 0;
 		uint32_t prev_pos = 0;
 		int32_t sample = 0;
+		uint32_t guard = 0;
 
 		while (update_freq(c, &pos)) {
+			if (++guard >= APU_FREQ_GUARD) break;
 			c->square.duty_counter = (c->square.duty_counter + 1) & 7;
 			sample += ((pos - prev_pos) / c->freq_inc) * c->val;
 			c->val = (c->square.duty & (1 << c->square.duty_counter)) ?
@@ -196,10 +211,12 @@ static IRAM_ATTR void update_wave(struct minigb_apu_ctx *ctx, audio_sample_t *sa
 		uint32_t pos = 0;
 		uint32_t prev_pos = 0;
 		audio_sample_t sample = 0;
+		uint32_t guard = 0;
 
 		c->wave.sample = wave_sample(ctx, c->val, c->volume);
 
 		while (update_freq(c, &pos)) {
+			if (++guard >= APU_FREQ_GUARD) break;
 			c->val = (c->val + 1) & 31;
 			sample += ((pos - prev_pos) / c->freq_inc) *
 				((audio_sample_t)c->wave.sample - 8) *
@@ -254,8 +271,10 @@ static IRAM_ATTR void update_noise(struct minigb_apu_ctx *ctx, audio_sample_t *s
 		uint32_t pos      = 0;
 		uint32_t prev_pos = 0;
 		int32_t sample    = 0;
+		uint32_t guard    = 0;
 
 		while (update_freq(c, &pos)) {
+			if (++guard >= APU_FREQ_GUARD) break;
 			c->noise.lfsr_reg = (c->noise.lfsr_reg << 1) |
 				(c->val >= VOL_INIT_MAX/MAX_CHAN_VOLUME);
 

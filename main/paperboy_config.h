@@ -8,6 +8,16 @@
  */
 
 /*
+ * Master debug switch (normally set by main/CMakeLists.txt; this is the
+ * fallback). 0 = release: the always-on debug-feature suite (frame profiler,
+ * perf HUD, Core-1 load metering, per-audio profiling) compiles out. Set to 1
+ * (-DPAPERBOY_DEBUG=1) to enable them.
+ */
+#ifndef PAPERBOY_DEBUG
+#define PAPERBOY_DEBUG 0
+#endif
+
+/*
  * Game Boy backend selection:
  *   0 = auto (prefer gbjit for supported ROMs, else Walnut)
  *   1 = Walnut-CGB

@@ -2,32 +2,31 @@
  * audio.c — I2S PDM TX audio output for M5PaperS3 buzzer
  *
  * Architecture:
- *   emulator task
- *       → writes APU registers via audio_apu_read/write()
- *         (these update s_apu, which lives here)
+ *   emulator (Core 0)
+ *       → writes APU registers via audio_apu_read/write() (update s_apu)
  *
- *   audio output task  (owns the APU synthesis loop)
+ *   APU synthesis (runs in the e-paper "msg" task on Core 1, once per field via
+ *   audio_service_frame → audio_pcm_service_frame)
  *       → whenever ring has room for ≥ AUDIO_SAMPLES mono samples:
  *             minigb_apu_audio_callback() → down-mix → ring buffer
  *       → drains ring buffer in DMA_CHUNK-sample blocks
  *       → i2s_channel_write() → I2S PDM TX DMA → GPIO → RC → buzzer
  *
- * Decoupling: the APU runs at the I2S hardware clock rate (~59.7 calls/sec
- * in steady state) regardless of emulation speed.  The emulator only writes
- * register state; it never calls the synthesis callback itself.
+ * Decoupling: the APU runs at the field cadence regardless of emulation speed.
+ * The emulator only writes register state; it never calls the synthesis itself.
  *
- * Concurrency: both tasks share core 0.  FreeRTOS single-core preemption
- * guarantees that the audio task (higher priority) and the emulator task
- * never truly run simultaneously, so s_apu access is race-free.
+ * Concurrency: s_apu is shared across cores (Core 0 writes registers, Core 1
+ * synthesizes) WITHOUT a lock. A cross-core lock is deliberately avoided so the
+ * real-time, never-yielding Core-1 field driver never disables interrupts. The
+ * synthesis code in minigb_apu.c is hardened against any torn read of s_apu
+ * (set_note_freq clamps its divisor; the per-sample loops are iteration-capped),
+ * so the worst a race can do is produce one slightly-wrong sample.
  */
 
 #include "audio.h"
 
 #include <string.h>
 #include <stdatomic.h>
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 
 #include "driver/i2s_pdm.h"
 #include "driver/i2s_common.h"
@@ -48,6 +47,14 @@ static const char *TAG = "audio";
  * APU state (owned here; emulator writes registers via audio_apu_read/write)
  * --------------------------------------------------------------------- */
 
+/* s_apu is touched by TWO cores: the emulator (Core 0) on every APU register
+ * read/write, and the audio synthesis (minigb_apu_audio_callback) which runs in
+ * the e-paper "msg" task on Core 1. The two can race, but the synthesis code in
+ * minigb_apu.c is hardened against any torn read of the APU state (set_note_freq
+ * clamps its divisor and the per-sample loops are iteration-capped), so the
+ * worst case is an occasional wrong sample — never a crash or a runaway loop.
+ * A cross-core lock is therefore avoided here: it would disable interrupts in
+ * the real-time, never-yielding Core-1 field driver. */
 static struct minigb_apu_ctx DRAM_ATTR s_apu;
 
 /*
@@ -138,7 +145,7 @@ static int16_t DRAM_ATTR s_dma_buf[DMA_CHUNK];
  * Internal helpers
  * --------------------------------------------------------------------- */
 
-static void audio_generate_chunk_locked(void)
+static void audio_generate_chunk(void)
 {
     minigb_apu_audio_callback(&s_apu, s_apu_buf);
 
@@ -258,12 +265,14 @@ void audio_pcm_service_frame(void)
             break;
         }
 
-        audio_generate_chunk_locked();
+        audio_generate_chunk();
         s_pending_target_samples -= AUDIO_SAMPLES;
     }
 
     audio_pump_i2s_nonblocking();
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
     profiler_audio_add(esp_timer_get_time() - start_us);
+#endif
 
     if (AUDIO_BUDGET_US > 0) {
         int64_t elapsed_us = esp_timer_get_time() - start_us;

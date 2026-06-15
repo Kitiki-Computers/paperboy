@@ -11,6 +11,7 @@
 #include "cpu_state.h"
 #include "dispatcher.h"
 #include "memory.h"
+#include "ppu.h"
 #include "ppu_thread.h"
 
 static const char *TAG = "gbjit_pb";
@@ -18,6 +19,12 @@ static const char *TAG = "gbjit_pb";
 static cpu_state s_cpu;
 static mmu s_mmu;
 static gbjit_dispatcher s_dispatcher;
+
+/* Max GB-frames of cycles emulated per paperboy_gb_run_frame() call. Bounds the
+ * per-wall-frame work while a game holds the LCD off (no VBlank to end the
+ * loop) — e.g. a level load — so off-screen init spreads across wall frames
+ * instead of one ~100ms spike. Runtime-tunable via the 'm' debug command. */
+static int s_max_subframes = 2;
 static bool s_dispatcher_ready;
 static bool s_ready;
 static char s_last_error[128];
@@ -46,10 +53,10 @@ static bool gbjit_is_rom_supported(const uint8_t *rom, size_t rom_size)
     }
 
     switch (cart_type) {
-    case 0x00:
-    case 0x01:
-    case 0x02:
-    case 0x03:
+    case 0x00:                          /* ROM only            */
+    case 0x01: case 0x02: case 0x03:    /* MBC1 (+RAM/+battery) */
+    case 0x0F: case 0x10: case 0x11:    /* MBC3 (+timer)        */
+    case 0x12: case 0x13:               /* MBC3 (+RAM/+battery) */
         return true;
     default:
         return false;
@@ -79,10 +86,11 @@ static void io_write_cb(void *ctx, uint16_t addr, uint8_t value)
 static bool gbjit_init_backend(const uint8_t *rom, size_t rom_size)
 {
     if (!gbjit_is_rom_supported(rom, rom_size)) {
-        set_last_error("gbjit only supports DMG ROM/MBC1 carts up to 256KB");
+        set_last_error("gbjit supports DMG ROM-only / MBC1 / MBC3 carts up to 2MB");
         return false;
     }
 
+    ppu_offload_thread_stop();
     ppu_thread_stop();
     if (s_dispatcher_ready) {
         gbjit_dispatcher_shutdown(&s_dispatcher);
@@ -115,7 +123,30 @@ static bool gbjit_init_backend(const uint8_t *rom, size_t rom_size)
     }
     s_dispatcher_ready = true;
 
+    /* Match the known-good HTIT-WB32LAF_V3.2 board build: disable the
+     * static-successor prefetcher. gbjit_dispatcher_init() defaults it ON,
+     * but the HTIT app (boards/.../main/app_main.c) explicitly turns it OFF.
+     * With it on, the dispatcher eagerly compiles fall-through successor
+     * blocks; on the SML title->level transition that's a burst of
+     * compiles that (a) spikes one frame to ~190 ms (visible freeze) and
+     * (b) churns the code cache enough that native execution mis-branches
+     * (jumps into the bonus-game handler / locks up). The lazy chain-miss
+     * path still compiles blocks on demand. The host Xtensa simulator
+     * tolerates the prefetch path, so this only shows on real hardware. */
+    s_dispatcher.prefetch_enabled = false;
+
+#if defined(PAPERBOY_GB_FORCE_INTERP) && PAPERBOY_GB_FORCE_INTERP
+    /* Debug toggle: run every step through the reference interpreter
+     * (sm83_step) instead of compiling/executing native JIT blocks. Same
+     * dispatcher loop, same PPU/timer ticking — isolates JIT-codegen /
+     * native-execution bugs (e.g. instruction-cache staleness) from the
+     * shared core. Enabled via -DPAPERBOY_GB_FORCE_INTERP=1. */
+    s_dispatcher.interp_fallback = true;
+    ESP_LOGW(TAG, "gbjit: FORCE_INTERP enabled (no native JIT)");
+#endif
+
     ppu_thread_start(&s_cpu);
+    ppu_offload_thread_start();   /* no-op unless GBJIT_PPU_OFFLOAD_THREAD */
 
     s_ready = true;
     set_last_error("ok");
@@ -132,6 +163,11 @@ static void gbjit_set_buttons(uint8_t pressed_mask)
     mmu_set_joypad_state(&s_mmu, pressed_mask);
 }
 
+const uint8_t *paperboy_gb_debug_lcd(void)
+{
+    return (s_ready && s_dispatcher_ready) ? s_mmu.framebuffer : NULL;
+}
+
 static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
 {
     uint32_t start_frame;
@@ -141,15 +177,13 @@ static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
         return false;
     }
 
-    start_frame = s_mmu.frame_seq;
-    do {
-        gbjit_dispatcher_run_until(&s_dispatcher, s_cpu.cycles + GB_FRAME_CYCLES);
-        if (s_cpu.stopped) {
-            set_last_error("cpu stopped");
-            return false;
-        }
-    } while (s_ready && s_mmu.frame_seq == start_frame);
-
+#if GBJIT_PPU_OFFLOAD_THREAD
+    /* Pipelined: the render of the *previous* frame was dispatched to the
+     * second core at its VBlank and ran concurrently with this thread's
+     * idle time (the e-paper VSYNC wait). Block until it's complete, then
+     * blit it. This surfaces frames with one frame of latency, but keeps
+     * the ~11.5 ms scanline render off this core's critical path. */
+    ppu_offload_render_wait();
     if (!skip_render && fb != NULL) {
         PROF_BEGIN(PROF_LCD);
         for (uint_fast8_t line = 0; line < GB_LCD_HEIGHT; line++) {
@@ -158,45 +192,123 @@ static bool gbjit_run_frame(uint8_t *fb, bool skip_render)
         }
         PROF_END(PROF_LCD);
     }
+#endif
+
+    /* Skipped frames won't be displayed (the main loop fell behind VSYNC and is
+     * catching up). Tell the PPU to run timing-only: it advances LY/STAT/mode/
+     * IRQ and window_line exactly as a drawn frame but skips the ~11 ms per-pixel
+     * scanline render. The framebuffer is never read for a skipped frame; the
+     * next displayed frame redraws all 144 lines fresh. */
+    gbjit_ppu_skip_pixels = skip_render ? 1 : 0;
+
+    /* Bound the work per wall-clock frame. Normally one VBlank fires per
+     * GB_FRAME_CYCLES and the loop runs once. But while a game holds the LCD
+     * OFF (SML does this during a level load), frame_seq never advances, so the
+     * loop would otherwise grind through the *entire* off-screen init in a
+     * single wall frame — hundreds of fresh-block compiles back to back, the
+     * ~135 ms "1% low" spike. Cap the sub-frames per call: when the LCD is off
+     * we return after MAX_SUBFRAMES GB-frames of cycles, spreading the init
+     * across several wall frames (nothing is displayed during LCD-off anyway,
+     * and cpu->cycles is continuous so timing/IRQ state is unaffected). */
+    int subframes = 0;
+    start_frame = s_mmu.frame_seq;
+    do {
+        gbjit_dispatcher_run_until(&s_dispatcher, s_cpu.cycles + GB_FRAME_CYCLES);
+        if (s_cpu.stopped) {
+            set_last_error("cpu stopped");
+            gbjit_ppu_skip_pixels = 0;
+            return false;
+        }
+    } while (s_ready && s_mmu.frame_seq == start_frame
+             && ++subframes < s_max_subframes);
+
+    gbjit_ppu_skip_pixels = 0;
+
+#if !GBJIT_PPU_OFFLOAD_THREAD
+    /* Synchronous render: the scanlines were drawn during emulation (at each
+     * mode3->0, or batched at VBlank under GBJIT_PPU_OFFLOAD), so the GB
+     * framebuffer holds this frame now. */
+    if (!skip_render && fb != NULL) {
+        PROF_BEGIN(PROF_LCD);
+        for (uint_fast8_t line = 0; line < GB_LCD_HEIGHT; line++) {
+            const uint8_t *src = &s_mmu.framebuffer[(size_t)line * GB_LCD_WIDTH];
+            paperboy_gb_blit_line(fb, src, line);
+        }
+        PROF_END(PROF_LCD);
+    }
+#endif
 
     return true;
 }
 
+/* Battery-backed cart RAM persistence. The .sav payload is the raw external
+ * RAM (standard emulator .sav format), so it interoperates with other tools.
+ * The RTC (Gen-2 only; not the carts we support) is not serialized. */
 static bool gbjit_has_persist(void)
 {
-    return false;
+    return s_ready && s_mmu.cart_ram != NULL && s_mmu.cart_ram_size > 0
+        && s_mmu.has_battery;
 }
 
 static size_t gbjit_persist_size(void)
 {
-    return 0;
+    return gbjit_has_persist() ? (size_t)s_mmu.cart_ram_size : 0u;
 }
 
 static bool gbjit_persist_is_dirty(void)
 {
-    return false;
+    return gbjit_has_persist() && s_mmu.cart_ram_dirty != 0u;
 }
 
 static bool gbjit_persist_export(uint8_t *dst, size_t dst_size, uint32_t timestamp)
 {
-    (void)dst;
-    (void)dst_size;
     (void)timestamp;
-    set_last_error("persist not implemented for gbjit");
-    return false;
+    if (!gbjit_has_persist()) { set_last_error("no battery RAM"); return false; }
+    if (dst == NULL || dst_size < s_mmu.cart_ram_size) {
+        set_last_error("persist dst too small");
+        return false;
+    }
+    memcpy(dst, s_mmu.cart_ram, s_mmu.cart_ram_size);
+    return true;
 }
 
 static bool gbjit_persist_import(const uint8_t *src, size_t src_size, uint32_t current_timestamp)
 {
-    (void)src;
-    (void)src_size;
     (void)current_timestamp;
-    set_last_error("persist not implemented for gbjit");
-    return false;
+    if (!gbjit_has_persist()) { set_last_error("no battery RAM"); return false; }
+    if (src == NULL || src_size != s_mmu.cart_ram_size) {
+        set_last_error("persist src size mismatch");
+        return false;
+    }
+    memcpy(s_mmu.cart_ram, src, s_mmu.cart_ram_size);
+    s_mmu.cart_ram_dirty = 0u;     /* freshly loaded == clean */
+    return true;
 }
 
 static void gbjit_persist_mark_clean(void)
 {
+    s_mmu.cart_ram_dirty = 0u;
+}
+
+/* Test helpers for validating flash persistence without driving a game's
+ * in-game save UI (debug console 'w'/'r'). 'fill' writes a deterministic
+ * pattern into cart RAM + marks it dirty; 'checksum' returns a 32-bit sum for
+ * round-trip verification across a reboot. No-ops without battery RAM. */
+uint32_t paperboy_jit_cartram_checksum(void)
+{
+    if (s_mmu.cart_ram == NULL || s_mmu.cart_ram_size == 0) return 0;
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < s_mmu.cart_ram_size; i++) sum += s_mmu.cart_ram[i];
+    return sum;
+}
+
+uint32_t paperboy_jit_cartram_fill_test(uint32_t seed)
+{
+    if (s_mmu.cart_ram == NULL || s_mmu.cart_ram_size == 0) return 0;
+    for (uint32_t i = 0; i < s_mmu.cart_ram_size; i++)
+        s_mmu.cart_ram[i] = (uint8_t)((i * 31u + seed) & 0xFFu);
+    s_mmu.cart_ram_dirty = 1u;
+    return paperboy_jit_cartram_checksum();
 }
 
 static size_t gbjit_state_size(void)
@@ -230,6 +342,48 @@ static const char *gbjit_last_error(void)
     return s_last_error;
 }
 
+/* Runtime tuning hook for the per-frame compile budget (see dispatcher.h).
+ * Used by the debug console 'c <n>' command to sweep values without reflashing.
+ * 0 = unlimited. */
+void paperboy_jit_set_compile_budget(uint32_t budget)
+{
+    s_dispatcher.compile_budget = budget;
+}
+
+uint32_t paperboy_jit_get_compile_budget(void)
+{
+    return s_dispatcher.compile_budget;
+}
+
+/* Runtime tuning for the static-successor prefetcher. depth 0 disables it
+ * (on-demand compiles only); depth>0 enables it to the given recursion depth.
+ * Debug-console 'p <n>'. */
+void paperboy_jit_set_prefetch_depth(uint32_t depth)
+{
+    if (depth == 0) {
+        s_dispatcher.prefetch_enabled = false;
+    } else {
+        s_dispatcher.prefetch_enabled = true;
+        s_dispatcher.prefetch_depth = (uint8_t)depth;
+    }
+}
+
+uint32_t paperboy_jit_get_prefetch_depth(void)
+{
+    return s_dispatcher.prefetch_enabled ? s_dispatcher.prefetch_depth : 0;
+}
+
+/* Runtime tuning for the LCD-off sub-frame cap (debug console 'm <n>'). */
+void paperboy_jit_set_max_subframes(uint32_t n)
+{
+    s_max_subframes = (n < 1) ? 1 : (int)n;
+}
+
+uint32_t paperboy_jit_get_max_subframes(void)
+{
+    return (uint32_t)s_max_subframes;
+}
+
 static bool gbjit_get_stats(paperboy_gb_stats_t *stats)
 {
     if (stats == NULL) {
@@ -245,6 +399,15 @@ static bool gbjit_get_stats(paperboy_gb_stats_t *stats)
     stats->blocks_executed = s_dispatcher.blocks_executed;
     stats->chain_hits = s_dispatcher.chain_hits;
     stats->chain_misses = s_dispatcher.chain_misses;
+    stats->smc_invalidations = s_dispatcher.smc_invalidations;
+    stats->arena_resets = s_dispatcher.arena_resets;
+    stats->bank_flips = s_dispatcher.bank_flips;
+    stats->smc_flushes = s_dispatcher.smc_flushes;
+    stats->bbc_hits = s_dispatcher.bbc_hits;
+    stats->bbc_misses = s_dispatcher.bbc_misses;
+    stats->interp_steps = s_dispatcher.interp_steps;
+    stats->arena_used = s_dispatcher.cc.used;
+    stats->arena_bytes = s_dispatcher.cc.cap;
     return true;
 }
 

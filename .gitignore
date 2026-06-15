@@ -76,3 +76,8 @@ Desktop.ini
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+
+# Local GB ROM corpus used for parity testing (not for distribution)
+/roms/
+# Opt-in autoboot ROM blob, embedded at build time only (not for distribution)
+/main/autoboot_rom.gb

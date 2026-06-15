@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -194,6 +195,52 @@ static int ui_draw_string(uint8_t *fb, int x, int y,
         x += CHAR_W;
     }
     return x;
+}
+
+/* Public wrapper so callers outside ui.c (e.g. the perf HUD in main.c) can
+ * render text into the video framebuffer with the shared 5x7 font. */
+void ui_draw_text(uint8_t *fb, int x, int y, const char *s, int fg, int bg)
+{
+    ui_draw_string(fb, x, y, s, fg, bg);
+}
+
+/* ── Perf HUD (cached) ─────────────────────────────────────────────────────
+ *
+ * Rendering glyphs into the framebuffer every frame costs ~10% fps on this
+ * CPU-bound device, and the game blit overwrites the overlay each frame so the
+ * redraw can't be skipped. Instead we render the HUD text into a cache strip
+ * only when a line's text changes (~1 Hz, via ui_hud_set_line) and memcpy the
+ * affected raw bytes into the live framebuffer every frame (ui_hud_blit,
+ * ~1.3 KB — near-free).
+ *
+ * The HUD is a HUD_COLS×HUD_LINES character box anchored top-left. In raw
+ * video_fb coordinates a logical pixel (x,y) sits at raw row x, raw col
+ * (143-y)*3+i, so the box occupies raw rows [0,HUD_W) and raw byte columns
+ * [HUD_BYTE0,HUD_BYTE1). */
+#define HUD_LINES   5
+#define HUD_COLS    18
+#define HUD_W       (HUD_COLS * CHAR_W)                 /* logical width  -> raw rows */
+#define HUD_H       (HUD_LINES * CHAR_H)                /* logical height -> raw cols */
+#define HUD_BYTE0   (((UI_SCREEN_H - HUD_H) * 3) / 8)   /* first raw byte col */
+#define HUD_BYTE1   (((UI_SCREEN_H * 3) + 7) / 8)       /* one past last raw byte col */
+
+/* HUD glyph cache (~8.6 KB) -> PSRAM (read by ui_hud_blit each frame). */
+static EXT_RAM_BSS_ATTR uint8_t s_hud_cache[UI_FB_PITCH * EPD_VIDEO_HEIGHT];
+
+void ui_hud_set_line(int row, const char *text)
+{
+    if (row < 0 || row >= HUD_LINES) return;
+    int y = row * CHAR_H;
+    ui_put_rect(s_hud_cache, 0, y, HUD_W, y + CHAR_H, 3);     /* white box   */
+    if (text) ui_draw_string(s_hud_cache, 1, y, text, 0, 3);  /* black text  */
+}
+
+void ui_hud_blit(uint8_t *fb)
+{
+    for (int r = 0; r < HUD_W; r++) {
+        int off = r * UI_FB_PITCH + HUD_BYTE0;
+        memcpy(&fb[off], &s_hud_cache[off], HUD_BYTE1 - HUD_BYTE0);
+    }
 }
 
 /* ── Menu layout ──────────────────────────────────────────────────────────

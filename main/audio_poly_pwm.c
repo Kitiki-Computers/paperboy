@@ -314,7 +314,9 @@ void audio_poly_service_frame(void)
         ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
     }
 
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
     profiler_audio_add(esp_timer_get_time() - start_us);
+#endif
 
     const uint32_t AUDIO_BUDGET_US = PAPERBOY_AUDIO_BUDGET_MS * 1000;
     if (AUDIO_BUDGET_US > 0) {

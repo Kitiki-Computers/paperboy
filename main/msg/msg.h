@@ -65,6 +65,10 @@
 
 void msg_init(void);
 void msg_start(void);
+// Suspend / resume the e-paper field driver (e.g. to quiesce Core 1 around a
+// blocking flash write). The e-paper holds its image while paused.
+void msg_pause(void);
+void msg_resume(void);
 void msg_display_image(uint8_t *img, bool to_white);
 void msg_enable_video(bool en);
 // Block until the next VSYNC, swap buffers, and return the new back-buffer.
@@ -76,3 +80,10 @@ uint8_t *msg_flip_nowait(void);
 // Monotonic counter incremented at every EPD frame-start (VSYNC).
 // Read before and after rendering to detect a missed VSYNC.
 uint32_t msg_get_vsync_count(void);
+
+// Core-1 load for the most recently completed e-paper field, in microseconds:
+//   busy_us  = time spent computing waveforms (reclaimable only by faster code)
+//   idle_us  = time spent busy-spinning on row DMA (headroom for offloaded work)
+//   field_us = total field driving time (busy + idle)
+// Any pointer may be NULL. Safe to call from another core (atomic word reads).
+void msg_get_load(uint32_t *busy_us, uint32_t *idle_us, uint32_t *field_us);

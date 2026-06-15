@@ -24,7 +24,9 @@ void audio_write(uint16_t addr, uint8_t val);
 
 static const char *TAG = "gbemu";
 
-static struct gb_s s_gb;
+/* Walnut/peanut fallback state (~17 KB), unused for JIT games. PSRAM-park it
+ * to free internal SRAM for the JIT arena (GBJIT_ARENA_KB). */
+static EXT_RAM_BSS_ATTR struct gb_s s_gb;
 static const uint8_t *s_rom;
 static size_t s_rom_size;
 static uint8_t *s_cart_ram;

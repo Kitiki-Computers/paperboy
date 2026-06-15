@@ -1,0 +1,13 @@
+# Custom partition table (16 MB flash). Offsets auto-computed: table @0x8000,
+# nvs @0x9000, phy_init @0xF000, factory @0x10000 — same starts as the stock
+# singleapp_large table, so existing NVS data is preserved across the switch.
+#
+#   factory  2.5 MB  — firmware (~0.5 MB) + an embedded autoboot ROM up to the
+#                      2 MB ROM_SIZE_MAX (e.g. 1 MB Pokemon R/B).
+#   storage  1 MB FAT — battery-backed cart RAM saves (.sav) for the embedded
+#                      ROM path, which has no SD card. Mounted at /flash.
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      ,         0x6000
+phy_init,   data, phy,      ,         0x1000
+factory,    app,  factory,  ,         0x280000
+storage,    data, fat,      ,         0x100000
