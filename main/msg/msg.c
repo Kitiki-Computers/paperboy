@@ -50,16 +50,19 @@ static esp_lcd_i80_bus_handle_t i80_bus_handle = NULL;
 static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
 static volatile uint32_t s_vsync_count = 0;
 
-/* Core-1 load measurement. The msg task drives the e-paper field-sequentially,
- * computing each row's waveform then busy-spinning (msg_send_row) on the prior
- * row's DMA. We split each field into "busy" (compute) and "idle" (DMA spin)
- * us. idle is the Core-1 headroom reclaimable for offloaded work (e.g. PPU).
- * Written by the Core-1 task, read by the Core-0 profiler — single-word
- * volatile reads/writes are atomic on Xtensa LX7. */
+/* Core-1 load measurement (debug only — feeds the profiler/perf-HUD). The msg
+ * task drives the e-paper field-sequentially, computing each row's waveform then
+ * busy-spinning (msg_send_row) on the prior row's DMA. We split each field into
+ * "busy" (compute) and "idle" (DMA spin) us. Compiled out in a release build so
+ * the per-spin esp_timer_get_time() reads on Core 1 cost nothing. Written by the
+ * Core-1 task, read by the Core-0 profiler — single-word volatile is atomic on
+ * Xtensa LX7. */
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
 static volatile uint32_t s_msg_busy_us = 0;   /* last field: compute us       */
 static volatile uint32_t s_msg_idle_us = 0;   /* last field: DMA-spin us       */
 static volatile uint32_t s_msg_field_us = 0;  /* last field: total driving us  */
 static uint32_t s_field_spin_us = 0;          /* per-field accumulator (C1)    */
+#endif
 
 // Triple buffer:
 // prev-buffer: Previous, for partial update use
@@ -113,11 +116,15 @@ static void msg_power_off() {
 
 static void IRAM_ATTR msg_send_row(uint8_t *data) {
     // Wait if last line hasn't finished
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
     if (!dma_done) {
         int64_t _t = esp_timer_get_time();
         while (!dma_done); // Spin loop, shouldn't yield
         s_field_spin_us += (uint32_t)(esp_timer_get_time() - _t);
     }
+#else
+    while (!dma_done); // Spin loop, shouldn't yield
+#endif
 
     gpio_set_level(EPD_GDCK_PIN, 0);
     gpio_set_level(EPD_SDLE_PIN, 1);
@@ -139,8 +146,10 @@ static void IRAM_ATTR msg_update_task(void *arg) {
 #endif
 
     while (true) {
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
         int64_t frame_start_us = esp_timer_get_time();
         s_field_spin_us = 0;   // reset per-field DMA-spin accumulator
+#endif
 
         // JUST KEEP CRANKING
         s_vsync_count++;
@@ -298,12 +307,12 @@ static void IRAM_ATTR msg_update_task(void *arg) {
         // Send additional dummy line
         memset(dma_buf[0], 0, EPD_WIDTH / 4 + EPD_LINE_PAD);
         msg_send_row(dma_buf[0]);
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
         if (!dma_done) {
             int64_t _t = esp_timer_get_time();
             while (!dma_done);
             s_field_spin_us += (uint32_t)(esp_timer_get_time() - _t);
         }
-
         // Record this field's Core-1 load split (busy compute vs idle DMA spin).
         {
             uint32_t field_us = (uint32_t)(esp_timer_get_time() - frame_start_us);
@@ -312,6 +321,9 @@ static void IRAM_ATTR msg_update_task(void *arg) {
             s_msg_busy_us  = (field_us > s_field_spin_us)
                            ? (field_us - s_field_spin_us) : 0u;
         }
+#else
+        while (!dma_done);   // wait for the last row's DMA
+#endif
 
 #ifdef TIME_PRINT
         uint32_t end = esp_timer_get_time();
@@ -425,9 +437,15 @@ void msg_init(void) {
 }
 
 void msg_get_load(uint32_t *busy_us, uint32_t *idle_us, uint32_t *field_us) {
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
     if (busy_us)  *busy_us  = s_msg_busy_us;
     if (idle_us)  *idle_us  = s_msg_idle_us;
     if (field_us) *field_us = s_msg_field_us;
+#else
+    if (busy_us)  *busy_us  = 0;
+    if (idle_us)  *idle_us  = 0;
+    if (field_us) *field_us = 0;
+#endif
 }
 
 void msg_display_image(uint8_t *img, bool to_white) {

@@ -89,6 +89,15 @@ typedef struct {
 /* Copy the latest published HUD snapshot. Cheap; call every frame. */
 void profiler_get_hud(profiler_hud_t *out);
 
-/* Convenience macros */
+/* Convenience macros. In a release build (PAPERBOY_DEBUG=0) these compile to
+ * nothing, so the per-phase esp_timer_get_time() reads on the hot paths
+ * (ppu_tick, per-frame, per-line blit) cost zero. PAPERBOY_DEBUG comes from the
+ * CMake compile-definition; profiler.h is also pulled into the gbjit submodule
+ * (core/ppu.c), which is compiled in the same component and so sees it. */
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
 #define PROF_BEGIN(phase)  profiler_begin(phase)
 #define PROF_END(phase)    profiler_end(phase)
+#else
+#define PROF_BEGIN(phase)  ((void)0)
+#define PROF_END(phase)    ((void)0)
+#endif

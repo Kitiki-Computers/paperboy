@@ -30,8 +30,10 @@
 
 static const char *TAG = "paperboy";
 
+/* Normally set by main/CMakeLists.txt (defaults to PAPERBOY_DEBUG). Fallback off
+ * for a release build if it ever reaches here undefined. */
 #ifndef PAPERBOY_PERF_HUD
-#define PAPERBOY_PERF_HUD 1
+#define PAPERBOY_PERF_HUD 0
 #endif
 #if PAPERBOY_PERF_HUD
 /* Perf HUD on/off at runtime (toggle with the 'h' debug-console command).

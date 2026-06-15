@@ -35,11 +35,25 @@ idf_component_register(
 # Audio APU format: 16-bit signed integer
 target_compile_definitions(${COMPONENT_LIB} PRIVATE MINIGB_APU_AUDIO_FORMAT_S16SYS)
 
+# Master debug switch. -DPAPERBOY_DEBUG=1 enables the always-on debug-feature
+# suite that would otherwise add steady-state overhead to a shipped build:
+#   - the frame-time profiler (PROF_* esp_timer instrumentation + its per-second
+#     log line),  - the on-screen perf HUD,  - Core-1 e-paper load metering,
+#   - per-audio-frame profiling.
+# 0 (the default) is a clean RELEASE: every one of those compiles out. The
+# heavier, separately useful opt-ins (PAPERBOY_DEBUG_CONSOLE, PAPERBOY_JIT_STATS,
+# PAPERBOY_GB_FORCE_INTERP, PAPERBOY_LOCKSTEP_DIFF, PAPERBOY_AUTOTEST) stay their
+# own -D flags and are already off unless explicitly requested.
+if(NOT DEFINED PAPERBOY_DEBUG)
+    set(PAPERBOY_DEBUG 0)
+endif()
+target_compile_definitions(${COMPONENT_LIB} PRIVATE PAPERBOY_DEBUG=${PAPERBOY_DEBUG})
+
 # On-screen perf HUD (worst-case FPS/CPU/PPU/LCD/FLIP/sound timing overlaid on
-# the top-left of the frame). Default ON; disable with -DPAPERBOY_PERF_HUD=0.
-# Runtime toggle: the 'h' debug-console command.
+# the top-left of the frame). Defaults to the master debug switch (off in a
+# release build); force with -DPAPERBOY_PERF_HUD=1/0. Runtime toggle: 'h'.
 if(NOT DEFINED PAPERBOY_PERF_HUD)
-    set(PAPERBOY_PERF_HUD 1)
+    set(PAPERBOY_PERF_HUD ${PAPERBOY_DEBUG})
 endif()
 target_compile_definitions(${COMPONENT_LIB} PRIVATE PAPERBOY_PERF_HUD=${PAPERBOY_PERF_HUD})
 

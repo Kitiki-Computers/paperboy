@@ -9,6 +9,8 @@
 #include "paperboy_config.h"
 #include "msg.h"
 
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
+
 static const char *TAG = "prof";
 
 /* Timestamp (µs) taken at profiler_begin(). */
@@ -176,3 +178,12 @@ void profiler_frame_end(bool skipped)
     s_sec_skipped = 0;
     s_sec_start_us = now_us;
 }
+
+#else  /* !PAPERBOY_DEBUG — release: the whole profiler compiles to no-ops, so
+        * the PROF_* esp_timer reads and the per-second log cost nothing. */
+void profiler_get_hud(profiler_hud_t *out)  { if (out) memset(out, 0, sizeof(*out)); }
+void profiler_begin(int phase)              { (void)phase; }
+void profiler_end(int phase)                { (void)phase; }
+void profiler_audio_add(int64_t elapsed_us) { (void)elapsed_us; }
+void profiler_frame_end(bool skipped)       { (void)skipped; }
+#endif /* PAPERBOY_DEBUG */

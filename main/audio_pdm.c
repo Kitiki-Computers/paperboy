@@ -263,7 +263,9 @@ void audio_pcm_service_frame(void)
     }
 
     audio_pump_i2s_nonblocking();
+#if defined(PAPERBOY_DEBUG) && PAPERBOY_DEBUG
     profiler_audio_add(esp_timer_get_time() - start_us);
+#endif
 
     if (AUDIO_BUDGET_US > 0) {
         int64_t elapsed_us = esp_timer_get_time() - start_us;
