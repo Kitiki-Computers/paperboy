@@ -26,6 +26,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
+#include "esp_attr.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 
@@ -47,7 +48,8 @@ static int64_t  s_window_start_us = 0;
 static uint32_t s_window_frames = 0;
 static double   s_min_window_fps = 1e9;
 
-static char s_hex[GB_W * GB_H / 4 * 2 + 1];   /* 11520 + NUL */
+/* Framebuffer-dump scratch (~11.5 KB), debug-only -> PSRAM. */
+static EXT_RAM_BSS_ATTR char s_hex[GB_W * GB_H / 4 * 2 + 1];   /* 11520 + NUL */
 
 static void dump_fb(const uint8_t *fb);   /* fwd decl */
 

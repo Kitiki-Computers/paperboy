@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -223,7 +224,8 @@ void ui_draw_text(uint8_t *fb, int x, int y, const char *s, int fg, int bg)
 #define HUD_BYTE0   (((UI_SCREEN_H - HUD_H) * 3) / 8)   /* first raw byte col */
 #define HUD_BYTE1   (((UI_SCREEN_H * 3) + 7) / 8)       /* one past last raw byte col */
 
-static uint8_t s_hud_cache[UI_FB_PITCH * EPD_VIDEO_HEIGHT];
+/* HUD glyph cache (~8.6 KB) -> PSRAM (read by ui_hud_blit each frame). */
+static EXT_RAM_BSS_ATTR uint8_t s_hud_cache[UI_FB_PITCH * EPD_VIDEO_HEIGHT];
 
 void ui_hud_set_line(int row, const char *text)
 {

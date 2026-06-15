@@ -33,7 +33,13 @@ endif()
 # fall back to the interpreter permanently) jumping to ~145 fps at
 # 96 KB once the whole working set is JIT-resident. 96 KB is the knee.
 if(NOT DEFINED GBJIT_ARENA_KB)
-    set(GBJIT_ARENA_KB 96)
+    # 128KB is the largest IRAM arena that still leaves room for the e-ink
+    # statebuf (~67KB internal) after WiFi is disabled + cold .bss is parked in
+    # PSRAM (EXT_RAM_BSS). At 128KB SML's whole working set is resident, so the
+    # PSRAM block-byte-cache rehydration thrash is essentially gone
+    # (~17.6k -> ~200 rehydrations; action cpu ~77ms -> ~12ms; min_1s 12.7 ->
+    # 22.8 fps). 160KB overflows internal SRAM and crashes the e-ink task.
+    set(GBJIT_ARENA_KB 128)
 endif()
 # Full-frame render for the virtual LCD.
 if(NOT DEFINED GBJIT_PPU_DRAW_MIN_LY)
@@ -50,6 +56,11 @@ if(NOT DEFINED GBJIT_PPU_DRAW_MAX_X)
 endif()
 if(NOT DEFINED GBJIT_JIT_EVICT)
     set(GBJIT_JIT_EVICT 1)
+endif()
+# Skip the per-block sm83_service_interrupts/ppu_tick call when nothing is due
+# (inlined early-return predicate). Behavior-preserving; parity-verified.
+if(NOT DEFINED GBJIT_DISPATCHER_SERVICE_SHORTCUT)
+    set(GBJIT_DISPATCHER_SERVICE_SHORTCUT 1)
 endif()
 # PPU render offload to a second core. DEFAULT OFF on this board: the
 # M5Paper's e-paper panel needs continuous field-sequential driving, so the

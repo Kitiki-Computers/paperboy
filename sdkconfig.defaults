@@ -38,3 +38,5 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # Large single-app partition (no OTA); the firmware embeds image assets and
 # both emulator cores, so the default ~1 MB app partition is too small.
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_ESP_WIFI_ENABLED=n
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
