@@ -29,7 +29,9 @@ esp_err_t tp_init(void);
 
 /**
  * Sample the touchscreen and return both GameBoy button and Paperboy action
- * state for the current touch frame.
+ * state. GameBoy buttons remain held between GT911 reports and are released
+ * only when a valid report says the finger has lifted. Actions are reported
+ * only on their rising edge.
  */
 tp_state_t tp_read_state(void);
 

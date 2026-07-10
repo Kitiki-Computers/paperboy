@@ -89,8 +89,8 @@ static const tp_btn_zone_t s_btn_zones[] = {
     /* GB_BTN_RIGHT  */ { .r = { {354, 203, 403, 286}, {403, 227, 424, 263} } },
     /* GB_BTN_A      */ { .r = { { 19, 227,  96, 303}, {0, 0, 0, 0} } },
     /* GB_BTN_B      */ { .r = { {125, 188, 202, 267}, {0, 0, 0, 0} } },
-    /* GB_BTN_START  */ { .r = { {186,  71, 260,  99}, {0, 0, 0, 0} } },
-    /* GB_BTN_SELECT */ { .r = { {277,  71, 348,  99}, {0, 0, 0, 0} } },
+    /* GB_BTN_START  */ { .r = { {174,  58, 267, 112}, {0, 0, 0, 0} } },
+    /* GB_BTN_SELECT */ { .r = { {270,  58, 360, 112}, {0, 0, 0, 0} } },
 };
 
 static const uint8_t s_btn_masks[] = {
@@ -122,6 +122,7 @@ static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_i2c_dev;
 static bool    s_inited       = false;
 static int64_t s_skip_until_us = 0;   /* µs: skip I2C until this time */
+static uint8_t s_buttons_held = 0;   /* buttons from the last valid GT911 report */
 static uint8_t s_action_prev  = 0;   /* last raw action bits from a valid GT911 read */
 
 /* ── Low-level I2C helpers ───────────────────────────────────────────────── */
@@ -156,6 +157,10 @@ static esp_err_t gt911_read_regs(uint16_t reg, uint8_t *out, size_t len)
 static void gt911_bus_error_recovery(void)
 {
     ESP_LOGW(TAG, "I2C error — resetting bus, pausing touch for 500 ms");
+    /* Do not leave the emulator with a permanently held button if the
+     * controller disappears before it can send a release report. */
+    s_buttons_held = 0;
+    s_action_prev = 0;
     i2c_master_bus_reset(s_i2c_bus);
     s_skip_until_us = esp_timer_get_time() + TOUCH_ERROR_COOLDOWN_US;
 }
@@ -224,6 +229,8 @@ esp_err_t tp_init(void)
     }
 
     s_inited = true;
+    s_buttons_held = 0;
+    s_action_prev = 0;
     ESP_LOGI(TAG, "Touch driver ready (INT=GPIO%d)", GT911_PIN_INT);
     return ESP_OK;
 }
@@ -245,6 +252,7 @@ tp_state_t tp_read_state(void)
     /* INT is driven LOW by GT911 only when new touch data is pending.
      * With the pull-up in place, HIGH reliably means "no touch". */
     if (gpio_get_level(GT911_PIN_INT) != 0) {
+        state.gb_buttons = s_buttons_held;
         return state;
     }
 
@@ -258,6 +266,7 @@ tp_state_t tp_read_state(void)
     /* bit[7]: buffer_status — 1 means new touch data is ready */
     if (!(status & 0x80)) {
         gt911_write_reg(GT911_REG_STATUS, 0);   /* clear stale flag */
+        state.gb_buttons = s_buttons_held;
         return state;
     }
 
@@ -328,6 +337,7 @@ tp_state_t tp_read_state(void)
      * (finger fully lifted). */
     state.actions = raw_actions & (uint8_t)~s_action_prev;
     s_action_prev = raw_actions;
+    s_buttons_held = state.gb_buttons;
 
     return state;
 }
