@@ -1,5 +1,6 @@
 #include "touch.h"
 #include "gbemu.h"
+#include "board.h"
 
 #include <string.h>
 #include <stdbool.h>
@@ -10,12 +11,12 @@
 
 static const char *TAG = "touch";
 
-/* ── Hardware constants (M5PaperS3) ─────────────────────────────────────── */
+/* ── Hardware constants (per board, see board.h) ────────────────────────── */
 
-#define GT911_I2C_PORT   I2C_NUM_1
-#define GT911_PIN_SDA    41
-#define GT911_PIN_SCL    42
-#define GT911_PIN_INT    48   /* active-low when a touch sample is ready */
+#define GT911_I2C_PORT   ((i2c_port_t)TOUCH_I2C_PORT_NUM)
+#define GT911_PIN_SDA    TOUCH_PIN_SDA
+#define GT911_PIN_SCL    TOUCH_PIN_SCL
+#define GT911_PIN_INT    TOUCH_PIN_INT   /* active-low when a sample is ready */
 #define GT911_FREQ_HZ    400000
 
 /* I2C transaction timeout.  Long enough for the GT911 to respond, short
@@ -106,12 +107,23 @@ static const tp_btn_zone_t s_action_zones[] = {
     /* TP_ACTION_LOAD         */ { .r = { {14, 921, 112, 958}, {0, 0, 0, 0} } },
     /* TP_ACTION_SAVE         */ { .r = { {134, 921, 233, 958}, {0, 0, 0, 0} } },
     /* TP_ACTION_CLEAR_SCREEN */ { .r = { {30, 425, 514, 878}, {0, 0, 0, 0} } }, /* TODO: fill in emulated-screen tap coordinates */
+    /* TP_ACTION_POWER        */ { .r = { {255, 921, 353, 958}, {0, 0, 0, 0} } },
+    /*
+     * GT911 native space is (540 wide x 960 tall), i.e. the panel rotated:
+     *   panel_x = native_y ,  panel_y = native_x .
+     * LOAD / SAVE therefore sit on the panel's right-hand strip just outside
+     * the 432x480 video window (panel x 921..958).  The POWER zone continues
+     * that column, directly below SAVE (panel y 255..353).  Adjust these
+     * numbers against the "touch" raw-coordinate log if the strip on your unit
+     * differs.
+     */
 };
 
 static const uint8_t s_action_masks[] = {
     TP_ACTION_LOAD,
     TP_ACTION_SAVE,
     TP_ACTION_CLEAR_SCREEN,
+    TP_ACTION_POWER,
 };
 
 #define NUM_ACTIONS  (sizeof(s_action_zones) / sizeof(s_action_zones[0]))

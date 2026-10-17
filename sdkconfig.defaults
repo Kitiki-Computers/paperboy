@@ -1,0 +1,16 @@
+# ---------------------------------------------------------------------------
+# Common defaults for both supported boards.
+#
+# The board is selected by the IDF target:
+#   idf.py set-target esp32     → M5Paper  (original, ESP32-D0WDQ6-V3)
+#   idf.py set-target esp32s3   → M5PaperS3
+#
+# Target-specific options live in sdkconfig.defaults.<target>, which ESP-IDF
+# applies automatically after this file.
+# ---------------------------------------------------------------------------
+
+# The vendored CrankBoy/peanut_gb emulator core triggers -Werror on a handful
+# of harmless macro redefinitions (likely/unlikely, DMG_CLOCK_FREQ, ...).
+# The upstream project disables IDF's default -Werror; keep it disabled here.
+CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
+CONFIG_FATFS_LFN_HEAP=y

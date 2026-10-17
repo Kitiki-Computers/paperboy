@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "esp_vfs_fat.h"
 #include <esp_timer.h>
 #include "driver/spi_common.h"
@@ -21,6 +22,7 @@
 #include "touch.h"
 #include "ui.h"
 #include "battery.h"
+#include "reset_button.h"
 #include "profiler.h"
 
 static const char *TAG = "paperboy";
@@ -37,17 +39,24 @@ typedef struct {
 static paperboy_cfg_t s_cfg;
 
 #define PAPERBOY_PERSIST_EXTENSION ".sav"
-#define PAPERBOY_STATE_EXTENSION   ".state"
+/*
+ * Save-state sidecar extension.
+ *
+ * The SD card is mounted with CONFIG_FATFS_LFN_NONE (see sdkconfig), so every
+ * file is exposed under its 8.3 SHORT name - that is why the ROM shows up as
+ * "SUPERM~1.GB" instead of its real long name.  A sidecar name derived from
+ * that base (base is already up to 8 chars) must stay within 8.3 too.  The old
+ * ".state" is a 5-char extension => FatFS rejects it with FR_INVALID_NAME and
+ * f_open("wb") returns NULL ("Failed to open state file").  ".sst" is 3 chars,
+ * so "SUPERM~1.sst" is a legal short name.
+ */
+#define PAPERBOY_STATE_EXTENSION   ".sst"
 #define PAPERBOY_CFG_FILE          SD_MOUNT_POINT "/paperboy.cfg"
 
 #define PAPERBOY_GB_ROM_MAX_SIZE (4 * 1024 * 1024)
 #define SD_MOUNT_POINT "/sdcard"
 
-/* M5PaperS3 SD SPI pins */
-#define SD_PIN_CLK 39
-#define SD_PIN_MOSI 38
-#define SD_PIN_MISO 40
-#define SD_PIN_CS 47
+/* SD SPI pins come from board.h (they share the EPD bus on M5Paper). */
 
 /*
  * GB rendering: 3× scale, Bayer-like dithering, 90° CW rotation.
@@ -95,7 +104,11 @@ static esp_err_t sdcard_mount(void)
     gpio_set_pull_mode((gpio_num_t)SD_PIN_CS, GPIO_PULLUP_ONLY);
 
     err = spi_bus_initialize(host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
-    if (err != ESP_OK) {
+    if (err == ESP_ERR_INVALID_STATE) {
+        /* The bus is already up (on M5Paper the EPD IT8951 driver owns SPI2
+         * and shares SCK/MOSI/MISO with the card slot). Keep going. */
+        ESP_LOGI(TAG, "SPI%d already initialised, reusing for SD", host.slot);
+    } else if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(err));
         return err;
     }
@@ -234,7 +247,12 @@ static bool build_state_path(const char *rom_path, char *state_path, size_t stat
 static void cfg_read(paperboy_cfg_t *cfg)
 {
     cfg->last_rom[0]  = '\0';
+#if defined(PLAT_M5PAPER)
+    /* The original M5Paper has no on-board speaker/amplifier. */
+    cfg->audio_engine = AUDIO_ENGINE_MUTE;
+#else
     cfg->audio_engine = AUDIO_ENGINE_PCM;
+#endif
 
     FILE *f = fopen(PAPERBOY_CFG_FILE, "r");
     if (!f) {
@@ -586,6 +604,78 @@ static bool load_game_session(const char *rom_path, bool include_snapshot)
 
 /* ui_put_pixel / ui_put_rect are now defined in ui.c (see ui.h). */
 
+/*
+ * Soft power-off (option a).
+ *
+ *  1. Optionally snapshot the running game, so it resumes where it stopped.
+ *  2. Flush the config and cleanly unmount the SD card (commits the FAT).
+ *  3. Cut the panel and open the main-power latch (msg_power_off()).
+ *
+ * On M5Paper the latch on GPIO2 really removes power, so the board goes off and
+ * this only returns if the unit is powered purely from USB.  In that case we
+ * park here instead of spinning.
+ */
+static void paperboy_power_off(bool save_session)
+{
+    ESP_LOGI(TAG, "Power-off requested%s", save_session ? " (saving session)" : "");
+
+    if (save_session && s_rom_path[0] != '\0') {
+        if (save_game_session(s_rom_path)) {
+            ESP_LOGI(TAG, "Session saved before power-off");
+        }
+    }
+
+    cfg_write(&s_cfg);
+
+    if (s_sd_card != NULL) {
+        esp_err_t err = esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, s_sd_card);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "SD unmount failed: %s", esp_err_to_name(err));
+        }
+        s_sd_card = NULL;
+    }
+
+    msg_power_off();
+
+    while (1) {
+        vTaskDelay(portMAX_DELAY);
+    }
+}
+
+/*
+ * Reset-to-main-menu.
+ *
+ * The M5Paper handles real power on/off in hardware (running on battery, its
+ * physical reset/power path already opens the main-power rail), so the
+ * firmware no longer maps a software shutdown onto the dial switch.  Instead
+ * the dial centre asks for a full device reset:
+ *
+ *  1. Flush the config.
+ *  2. Cleanly unmount the SD card (commits the FAT before the reset).
+ *  3. esp_restart() -> app_main() runs again and re-enters the ROM picker,
+ *     i.e. the main menu.
+ *
+ * No game snapshot is taken: the point of the reset is to leave the game.
+ * This never returns.
+ */
+static void paperboy_reset_to_menu(void)
+{
+    ESP_LOGI(TAG, "Reset to main menu requested - restarting");
+
+    cfg_write(&s_cfg);
+
+    if (s_sd_card != NULL) {
+        esp_err_t err = esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, s_sd_card);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "SD unmount failed: %s", esp_err_to_name(err));
+        }
+        s_sd_card = NULL;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(100));   /* let the console drain */
+    esp_restart();
+}
+
 void app_main(void)
 {
     esp_err_t sd_err;
@@ -601,6 +691,9 @@ void app_main(void)
 
     tp_init();  /* GT911 touch — non-fatal if absent */
     battery_init();
+
+    reset_button_init();   /* M5Paper dial-switch centre = return-to-menu */
+    reset_button_start();
 
     uint8_t *fb = (uint8_t *)heap_caps_calloc(1, EPD_FB_SIZE, MALLOC_CAP_SPIRAM);
     memset(fb, 0xff, EPD_FB_SIZE);
@@ -635,6 +728,16 @@ void app_main(void)
 
             if (pick == UI_ROM_PICK_NONE) {
                 break;
+            }
+
+            if (pick == UI_ROM_PICK_POWER_OFF) {
+                /* Nothing is running yet, so only the config needs flushing. */
+                paperboy_power_off(false);
+            }
+
+            if (pick == UI_ROM_PICK_RESTART) {
+                /* Physical reset button held while the menu was open. */
+                paperboy_reset_to_menu();
             }
 
             if (pick == UI_ROM_PICK_LOAD_LAST) {
@@ -760,6 +863,18 @@ void app_main(void)
             vsync_ref = msg_get_vsync_count();
             skip_count = 0;
             continue;
+        }
+
+        if (action_edges & TP_ACTION_POWER) {
+            paperboy_gb_set_buttons(0);
+            paperboy_power_off(true);
+        }
+
+        /* Hardware reset button (M5Paper dial-switch centre, GPIO38):
+         * leave the game by resetting the device back to the main menu. */
+        if (reset_button_requested()) {
+            paperboy_gb_set_buttons(0);
+            paperboy_reset_to_menu();
         }
 
         bool skip_render = (skip_count > 0);

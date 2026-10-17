@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "reset_button.h"
 #include "battery.h"
 #include "msg/msg.h"
 #include "touch.h"
@@ -487,6 +488,13 @@ ui_rom_pick_result_t ui_rom_picker(const char *mount_pt, char *out_path, size_t 
         /* ── Input ──────────────────────────────────────────────── */
         ui_input_t ev = input_poll();
 
+        /* Physical reset button (M5Paper dial-switch centre): leave it to the
+         * main loop, which resets the device back to the main menu. */
+        if (reset_button_requested()) {
+            heap_caps_free(files);
+            return UI_ROM_PICK_RESTART;
+        }
+
         if (ev.buttons & GB_BTN_DOWN) {
             /* Advance, skipping non-selectable items. */
             int next = selection;
@@ -531,6 +539,11 @@ ui_rom_pick_result_t ui_rom_picker(const char *mount_pt, char *out_path, size_t 
         if (ev.actions & TP_ACTION_LOAD) {
             heap_caps_free(files);
             return UI_ROM_PICK_LOAD_LAST;
+        }
+
+        if (ev.actions & TP_ACTION_POWER) {
+            heap_caps_free(files);
+            return UI_ROM_PICK_POWER_OFF;
         }
     }
 
